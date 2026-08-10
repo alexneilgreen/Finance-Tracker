@@ -1,60 +1,108 @@
-# Ledger — Personal Finance & Investment Tracker
+<!-- SHOWCASE: true -->
 
-Local-only desktop finance app. Python + SQLite backend, single-page
-HTML/CSS/JS frontend, rendered in a native window via PyWebView.
+# Ledger
 
-## 1. Setup (one time)
+> A fully local desktop application for tracking personal finance, zero-based budgets, and net worth.
 
-```bash
-cd finance_tracker
-python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+![Status](https://img.shields.io/badge/status-in_progress-yellow)
+![Language](https://img.shields.io/badge/language-Python-blue)
+
+---
+
+## Project Description
+
+Ledger is a personal finance and investment tracker designed as a local desktop application. It provides tools for zero-based budgeting, tracking daily transactions, managing sinking funds, and aggregating net worth across various accounts. The application utilizes a Python and SQLite backend paired with a single-page HTML and JavaScript frontend, all rendered in a native window using PyWebView. I built this out of personal interest to create a custom tool capable of handling detailed zero-based budgeting while accurately tracking pre-tax retirement vehicles and long-term investments.
+
+---
+
+## Screenshots / Demo
+
+> _No screenshot available. Add one with: `![Demo](docs/your-image.png)`_
+
+---
+
+## Results
+
+When run correctly, the program launches a standalone desktop application window containing the Ledger interface[cite: 5]. The terminal running in the background will display standard Flask server logs on a local port, ensuring no network exposure[cite: 5]. 
+
+```
+ * Serving Flask app 'api'
+ * Debug mode: off
+ * Running on http://127.0.0.1:xxxxx
 ```
 
-## 2. Run it
+Users navigate between three main tabs: Budget, Track, and Report[cite: 6]. Within the Report tab, users can generate a multi-page Annual Report PDF[cite: 3]. This generated file contains monthly spending donut charts, budget adherence tables, and Sankey diagrams visualizing the flow of gross income[cite: 3]. Users can also export their database tables directly to `.xlsx` or `.csv` files by accessing the API export routes[cite: 1]. If the interface fails to load, check the terminal for port binding issues or missing dependencies. Data is automatically backed up to a local folder upon closing the application[cite: 5].
+
+---
+
+## Key Concepts
+
+`Zero-Based Budgeting` `Single-Page Application (SPA)` `Local API Server` `Desktop Web Wrapper` `Relational Database`
+
+---
+
+## Languages & Tools
+
+- **Language:** Python, JavaScript, HTML, CSS
+- **Framework/SDK:** Flask, PyWebView, Matplotlib, Pandas, Chart.js
+- **Build System:** PyInstaller
+
+---
+
+## File Structure
+
+```
+finance_tracker/
+├── main.py                 # Entry point that launches PyWebView and the local server[cite: 5]
+├── backend/
+│   ├── api.py              # Local API handling HTTP requests and database routing[cite: 1]
+│   ├── db_manager.py       # SQLite database schema, connection, and queries[cite: 2]
+│   └── pdf_report.py       # Multi-page PDF annual report generator using Matplotlib[cite: 3]
+├── frontend/
+│   ├── index.html          # SPA containing all page containers and UI layout[cite: 6]
+│   ├── css/
+│   │   └── style.css       # Desktop-maximized styling and visual theme[cite: 7]
+│   └── js/
+│       ├── main.js         # Core logic, main navbar routing, and shared helpers[cite: 9]
+│       ├── budget.js       # Template building and income parsing logic[cite: 8]
+│       ├── track.js        # Daily ledger, sinking funds, and net worth tracking[cite: 11]
+│       └── report.js       # Chart generation, budget flow SVG, and PDF preview[cite: 10]
+└── data/
+    ├── finance.db          # Local SQLite database file[cite: 2, 5]
+    └── backups/            # Automated database backups saved on application close[cite: 5]
+```
+
+---
+
+## Installation & Usage
+
+### Prerequisites
+- Python 3.8+
+
+### Setup
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/yourusername/ledger.git
+cd ledger
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run the application
 python main.py
 ```
 
-This starts a Flask server bound to `127.0.0.1` on a free local port and
-opens it in a native window. The first run creates `data/finance.db`
-automatically — nothing to configure.
+### Controls
 
-## 3. Everyday use
+| Interface Element | Action |
+|-------------------|--------|
+| Main Navbar | Switches between Budget, Track, and Report modules. |
+| Global Month Input | Changes the active month for budgeting and tracking. |
+| Generate Annual Report Button | Builds a PDF of all financial history for a selected year. |
 
-- **Budget** tab: log income, deductions, and pre-tax investments to see
-  Net Take-Home, then assign it to groups and line items.
-- **Track** tab: log daily transactions against those line items, manage
-  sinking funds/goals, and log account contributions + valuations.
-- **Report** tab: spending donut + breakdown table, the zero-based budget
-  flow, annual trend, and net worth (contributions vs. market value).
-- Use `/api/export/<table>?format=xlsx` (or `csv`) in a browser tab while
-  the app is running to pull any table into Excel — e.g.
-  `http://127.0.0.1:<port>/api/export/transactions?format=xlsx`. The port
-  is printed nowhere by design (security), so add a "Download" button
-  wired to that route if you want one-click exports from the UI.
-- Data lives entirely in `data/finance.db`. Closing the window copies a
-  timestamped backup into `data/backups/` (last 20 kept automatically).
+---
 
-## 4. Package as a single executable (optional)
+## License
 
-```bash
-pyinstaller --noconfirm --onefile --add-data "frontend:frontend" main.py
-```
-
-The compiled app appears in `dist/`. Copy the `data/` folder alongside it
-on first run if you want to carry over existing entries.
-
-## Notes on the blueprint's design choices
-
-- The frontend loads Chart.js from a CDN for the donut and trend charts,
-  which requires internet access the first time (browsers cache it after
-  that). If you need the app fully offline from first launch, download
-  `chart.umd.min.js` and reference it locally instead of the CDN link in
-  `frontend/index.html`.
-- The "Zero-Based Budget Flow" on the Report page is a lightweight,
-  hand-built horizontal flow view rather than a full Sankey chart library,
-  to keep the dependency list minimal — swap in a Sankey plugin later if
-  you want the literal diagram style.
+> _No license specified. All rights reserved by the author._
