@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ledger &mdash; Personal Finance &amp; Investment Tracker</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<!-- ============================================================
+     APP SHELL — left ledger spine (nav) + main content column
+     ============================================================ -->
+<div id="app-shell">
+
+  <!-- LEFT SPINE NAV — styled as tabbed ledger dividers -->
+  <nav id="main-navbar">
+    <div class="brand">
+      <span class="brand-mark">&#9670;</span>
+      <span class="brand-text">Ledger</span>
+    </div>
+
+    <button class="nav-tab active" data-page="budget">
+      <span class="tab-index">01</span>
+      <span class="tab-label">Budget</span>
+    </button>
+    <button class="nav-tab" data-page="track">
+      <span class="tab-index">02</span>
+      <span class="tab-label">Track</span>
+    </button>
+    <button class="nav-tab" data-page="report">
+      <span class="tab-index">03</span>
+      <span class="tab-label">Report</span>
+    </button>
+
+    <div class="nav-footer">
+      <label for="global-month">Ledger Month</label>
+      <input type="month" id="global-month" />
+    </div>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <main id="main-content">
+
+    <!-- ================= BUDGET PAGE ================= -->
+    <section id="page-budget" class="page active">
+      <header class="page-header page-header-row">
+        <div>
+          <h1>Budget</h1>
+          <p class="page-sub">Plan your month, dollar for dollar.</p>
+        </div>
+        <div class="preset-toolbar">
+          <select id="preset-select">
+            <option value="">Load a preset&hellip;</option>
+          </select>
+          <button class="btn-ghost" id="preset-apply-btn">Apply</button>
+          <button class="btn-ghost" id="preset-delete-btn" title="Delete the selected preset">Delete</button>
+          <button class="btn" id="preset-save-btn">Save as Preset</button>
+        </div>
+      </header>
+
+      <!-- ---- Income / Net Take-Home strip ---- -->
+      <div class="card income-strip">
+        <div class="income-col">
+          <h2>Income</h2>
+          <div id="income-list" class="mini-list"></div>
+          <form id="income-form" class="inline-form">
+            <input type="text" name="source" placeholder="Source (e.g. Salary)" required />
+            <input type="number" step="0.01" name="gross_amount" placeholder="Gross amount" required />
+            <button type="submit">Add income</button>
+          </form>
+        </div>
+        <div class="income-col">
+          <h2>Deductions</h2>
+          <div id="deductions-list" class="mini-list"></div>
+          <form id="deduction-form" class="inline-form">
+            <input type="text" name="name" placeholder="Taxes, insurance..." required />
+            <input type="number" step="0.01" name="amount" placeholder="Amount" required />
+            <button type="submit">Add</button>
+          </form>
+        </div>
+        <div class="income-col">
+          <h2>Pre-Tax Investments</h2>
+          <div id="investments-list" class="mini-list"></div>
+          <div id="match-total" class="hint"></div>
+          <form id="investment-form" class="inline-form">
+            <input type="text" name="name" placeholder="e.g. TSP Contribution" required />
+            <input type="number" step="0.01" name="amount" placeholder="Your contribution" required />
+            <label class="checkbox-label">
+              <input type="checkbox" name="has_match" id="has-match-checkbox" /> Employer match
+            </label>
+            <input type="number" step="0.01" name="match_amount" id="match-amount-input" placeholder="Match amount" style="display:none;" />
+            <button type="submit">Add</button>
+          </form>
+          <p class="hint">Checking "Employer match" logs two line items at once: your contribution (subtracted from Net Take-Home) and the match (tracked, not subtracted).</p>
+        </div>
+        <div class="income-col net-col">
+          <h2>Net Take-Home</h2>
+          <div class="net-figure" id="net-take-home-figure">$0.00</div>
+          <p class="hint">Gross &minus; deductions &minus; your own pre-tax investments. Employer match is tracked but not subtracted, since it never left your paycheck.</p>
+        </div>
+      </div>
+
+      <!-- ---- Zero-based assignment ---- -->
+      <div class="card">
+        <div class="card-header-row">
+          <h2>Assign the Plan</h2>
+          <div class="assign-status">
+            <span id="assigned-total">$0.00</span> assigned &middot;
+            <span id="unassigned-total">$0.00</span> unassigned
+          </div>
+        </div>
+
+        <div id="budget-groups-wrap"></div>
+
+        <form id="group-form" class="inline-form">
+          <input type="text" name="name" placeholder="New group name (e.g. Housing)" required />
+          <button type="submit">Add group</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ================= TRACK PAGE ================= -->
+    <section id="page-track" class="page">
+      <header class="page-header">
+        <h1>Track</h1>
+        <p class="page-sub">Execute the plan and watch wealth accumulate.</p>
+      </header>
+
+      <!-- Sub-navigation bar: Daily Ledger / Sinking Funds / Net Worth -->
+      <div class="subnav">
+        <button class="subnav-tab active" data-subpage="ledger">Daily Ledger</button>
+        <button class="subnav-tab" data-subpage="sinking">Sinking Funds &amp; Goals</button>
+        <button class="subnav-tab" data-subpage="networth">Net Worth Aggregator</button>
+      </div>
+
+      <!-- ---- Tab A: Daily Ledger ---- -->
+      <div id="subpage-ledger" class="subpage active">
+        <div class="card">
+          <h2>Log a transaction</h2>
+          <form id="transaction-form" class="inline-form">
+            <input type="date" name="date" required />
+            <select name="line_item_id" id="line-item-select" required></select>
+            <input type="text" name="description" placeholder="Description" />
+            <input type="number" step="0.01" name="amount" placeholder="Amount" required />
+            <button type="submit">Log expense</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Planned vs. Spent vs. Remaining</h2>
+          <table class="ledger-table" id="ledger-summary-table">
+            <thead>
+              <tr><th>Group</th><th>Line item</th><th>Planned</th><th>Spent</th><th>Remaining</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h2>Recent transactions</h2>
+          <table class="ledger-table" id="transactions-table">
+            <thead>
+              <tr><th>Date</th><th>Line item</th><th>Description</th><th>Amount</th><th></th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ---- Tab B: Sinking Funds & Goals ---- -->
+      <div id="subpage-sinking" class="subpage">
+        <div class="card">
+          <h2>New sinking fund or goal</h2>
+          <form id="fund-form" class="inline-form">
+            <input type="text" name="name" placeholder="e.g. HVAC filters, House down payment" required />
+            <input type="number" step="0.01" name="target_amount" placeholder="Target amount" required />
+            <input type="date" name="target_date" />
+            <button type="submit">Create</button>
+          </form>
+        </div>
+        <div id="funds-wrap"></div>
+      </div>
+
+      <!-- ---- Tab C: Net Worth Aggregator ---- -->
+      <div id="subpage-networth" class="subpage">
+        <div class="card">
+          <h2>New account</h2>
+          <form id="account-form" class="inline-form">
+            <input type="text" name="name" placeholder="e.g. Truist MMA, Vanguard Brokerage" required />
+            <input type="text" name="account_type" placeholder="Type (Cash, Brokerage, Retirement...)" required />
+            <button type="submit">Add account</button>
+          </form>
+        </div>
+        <div class="card" id="networth-chart-card" style="display:none;">
+          <h2>Value Over Time by Account</h2>
+          <div class="chart-fixed-height" style="height:150px;">
+            <canvas id="networth-accounts-chart"></canvas>
+          </div>
+        </div>
+        <div id="accounts-wrap"></div>
+      </div>
+    </section>
+
+    <!-- ================= REPORT PAGE ================= -->
+    <section id="page-report" class="page">
+      <header class="page-header page-header-row">
+        <div>
+          <h1>Report</h1>
+          <p class="page-sub">History and trends, at a glance.</p>
+        </div>
+        <button id="generate-annual-report-btn" class="btn">Generate Annual Report</button>
+      </header>
+
+      <div class="report-grid-1-2">
+        <div class="card">
+          <h2>Monthly Spending</h2>
+          <p class="hint">Inner ring = budgeted, outer ring = actually spent. Both rings total your full Net Take-Home.</p>
+          <canvas id="spending-donut" height="260"></canvas>
+          <div id="donut-legend" class="manual-legend"></div>
+        </div>
+
+        <div class="card">
+          <h2>Budget Adherence</h2>
+          <p class="hint">How closely actual spending is tracking to plan, based on transactions logged so far.</p>
+          <div id="adherence-overall" class="adherence-overall"></div>
+          <table class="ledger-table left-aligned" id="adherence-table">
+            <thead><tr><th>Group</th><th>Planned</th><th>Spent</th><th>% of Plan Used</th><th>Status</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Zero-Based Budget Flow</h2>
+        <p class="hint">Gross pay, traced through deductions, investments, and spending groups.</p>
+        <div id="budget-flow"></div>
+      </div>
+
+      <div class="card">
+        <h2>Annual Trend <input type="number" id="trend-year" class="year-input" /></h2>
+        <canvas id="annual-trend-chart" height="180"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Net Worth: Contributions vs. Market Value</h2>
+        <canvas id="net-worth-chart" height="195"></canvas>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Save as Preset modal -->
+<div class="modal-overlay" id="save-preset-modal">
+  <div class="modal-box">
+    <h2>Save as Preset</h2>
+    <p class="hint">Saves every group, line item, and planned amount from the currently selected month as a reusable template.</p>
+    <label for="save-preset-name" style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--ink-text-muted); display:block; margin-bottom:6px;">Preset name</label>
+    <input type="text" id="save-preset-name" style="width:100%;" placeholder="e.g. Standard Month" />
+    <div class="modal-status" id="save-preset-status"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="save-preset-cancel">Cancel</button>
+      <button class="btn" id="save-preset-confirm">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="annual-report-modal">
+  <div class="modal-box" id="annual-report-modal-box">
+    <h2>Generate Annual Report</h2>
+    <p class="hint">Builds a PDF with every month's spending, adherence, and budget flow, plus the annual trend and net worth charts on the final page.</p>
+
+    <div id="annual-report-picker">
+      <label for="annual-report-year" style="font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--ink-text-muted); display:block; margin-bottom:6px;">Year</label>
+      <input type="number" id="annual-report-year" style="width:100%;" />
+    </div>
+
+    <iframe id="annual-report-preview" style="display:none;"></iframe>
+
+    <div class="modal-status" id="annual-report-status"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="annual-report-cancel">Cancel</button>
+      <button class="btn" id="annual-report-confirm">Generate PDF</button>
+      <button class="btn" id="annual-report-download" style="display:none;">Download PDF</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/main.js"></script>
+<script src="js/budget.js"></script>
+<script src="js/track.js"></script>
+<script src="js/report.js"></script>
+</body>
+</html>

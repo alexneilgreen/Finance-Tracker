@@ -1,0 +1,6 @@
+pywebview==5.1
+Flask==3.0.3
+pandas==2.2.2
+openpyxl==3.1.5
+matplotlib==3.9.2
+pyinstaller==6.10.0
