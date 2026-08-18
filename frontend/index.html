@@ -39,8 +39,23 @@
     </button>
 
     <div class="nav-footer">
-      <label for="global-month">Ledger Month</label>
-      <input type="month" id="global-month" />
+      <div class="nav-footer-group">
+        <label for="global-month">Ledger Month</label>
+        <input type="month" id="global-month" />
+      </div>
+      <div class="nav-footer-group">
+        <label for="theme-select">Color Scheme</label>
+        <select id="theme-select">
+          <option value="dark-blue">Dark Blue</option>
+          <option value="blue">Blue</option>
+          <option value="dark-green">Dark Green</option>
+          <option value="green">Green</option>
+          <option value="dark-red">Dark Red</option>
+          <option value="red">Red</option>
+          <option value="dark-standard">Dark Standard</option>
+          <option value="standard">Standard</option>
+        </select>
+      </div>
     </div>
   </nav>
 
@@ -64,45 +79,71 @@
         </div>
       </header>
 
+      <!-- ---- Pay Schedule (biweekly/N-per-year payroll) ---- -->
+      <div class="card" id="pay-schedule-card">
+        <div class="card-header-row">
+          <h2>Pay Schedule</h2>
+          <span class="hint" id="pay-schedule-month-info"></span>
+        </div>
+        <p class="hint">Enter your annual income once. Deductions and investments below are <strong>per-paycheck</strong> amounts — they're multiplied automatically by however many paychecks land in the selected month (most months get 2, but a couple get 3, since 26 biweekly paychecks don't divide evenly into 12 months).</p>
+
+        <div class="pay-schedule-strip">
+          <div class="pay-schedule-col">
+            <h2>Pay Details</h2>
+            <form id="pay-schedule-form" class="pay-details-form">
+              <label for="ps-annual-income">Annual income</label>
+              <input type="number" step="0.01" id="ps-annual-income" placeholder="e.g. 78000" />
+              <label for="ps-anchor-date">A known pay date</label>
+              <input type="date" id="ps-anchor-date" />
+              <label for="ps-payments-per-year">Payments per year</label>
+              <input type="number" id="ps-payments-per-year" value="26" />
+              <button type="submit" class="btn">Save Pay Schedule</button>
+            </form>
+          </div>
+
+          <div class="pay-schedule-col">
+            <h2>Per-Paycheck Deductions</h2>
+            <div id="ps-deductions-list" class="mini-list"></div>
+            <form id="ps-deduction-form" class="inline-form">
+              <input type="text" name="name" placeholder="Taxes, insurance..." required />
+              <input type="number" step="0.01" name="amount" placeholder="Amount per check" required />
+              <button type="submit">Add</button>
+            </form>
+          </div>
+
+          <div class="pay-schedule-col">
+            <h2>Per-Paycheck Investments</h2>
+            <div id="ps-investments-list" class="mini-list"></div>
+            <form id="ps-investment-form" class="inline-form">
+              <input type="text" name="name" placeholder="TSP, 401k..." required />
+              <input type="number" step="0.01" name="amount" placeholder="Amount per check" required />
+              <label class="checkbox-label"><input type="checkbox" name="is_match" /> Employer match</label>
+              <button type="submit">Add</button>
+            </form>
+          </div>
+        </div>
+      </div>
+
       <!-- ---- Income / Net Take-Home strip ---- -->
       <div class="card income-strip">
         <div class="income-col">
           <h2>Income</h2>
           <div id="income-list" class="mini-list"></div>
-          <form id="income-form" class="inline-form">
-            <input type="text" name="source" placeholder="Source (e.g. Salary)" required />
-            <input type="number" step="0.01" name="gross_amount" placeholder="Gross amount" required />
-            <button type="submit">Add income</button>
-          </form>
         </div>
         <div class="income-col">
           <h2>Deductions</h2>
           <div id="deductions-list" class="mini-list"></div>
-          <form id="deduction-form" class="inline-form">
-            <input type="text" name="name" placeholder="Taxes, insurance..." required />
-            <input type="number" step="0.01" name="amount" placeholder="Amount" required />
-            <button type="submit">Add</button>
-          </form>
         </div>
         <div class="income-col">
           <h2>Pre-Tax Investments</h2>
           <div id="investments-list" class="mini-list"></div>
           <div id="match-total" class="hint"></div>
-          <form id="investment-form" class="inline-form">
-            <input type="text" name="name" placeholder="e.g. TSP Contribution" required />
-            <input type="number" step="0.01" name="amount" placeholder="Your contribution" required />
-            <label class="checkbox-label">
-              <input type="checkbox" name="has_match" id="has-match-checkbox" /> Employer match
-            </label>
-            <input type="number" step="0.01" name="match_amount" id="match-amount-input" placeholder="Match amount" style="display:none;" />
-            <button type="submit">Add</button>
-          </form>
-          <p class="hint">Checking "Employer match" logs two line items at once: your contribution (subtracted from Net Take-Home) and the match (tracked, not subtracted).</p>
+          <p class="hint">Employer match is tracked but not subtracted from Net Take-Home, since it never left your paycheck.</p>
         </div>
         <div class="income-col net-col">
           <h2>Net Take-Home</h2>
           <div class="net-figure" id="net-take-home-figure">$0.00</div>
-          <p class="hint">Gross &minus; deductions &minus; your own pre-tax investments. Employer match is tracked but not subtracted, since it never left your paycheck.</p>
+          <p class="hint">Gross &minus; deductions &minus; your own pre-tax investments.</p>
         </div>
       </div>
 
@@ -153,6 +194,23 @@
         </div>
 
         <div class="card">
+          <h2>Import Transactions</h2>
+          <p class="hint">Upload a Truist "individual line items" CSV export. Each row is logged automatically with a best-guess Line Item — re-uploading the same date range won't create duplicates, and rows it can't confidently categorize are left unassigned for you to review below.</p>
+          <form id="import-form" class="inline-form">
+            <input type="file" id="import-file-input" accept=".csv" required />
+            <button type="submit">Import CSV</button>
+          </form>
+          <div id="import-status" class="hint"></div>
+          <div id="import-month-nav" class="import-month-nav" style="display:none;"></div>
+        </div>
+
+        <div class="card" id="pending-credits-card" style="display:none;">
+          <h2>Credits to Review</h2>
+          <p class="hint">"Credit" rows from an import (Zelle received, reimbursements, etc.) aren't logged as transactions automatically — add each one to a Sinking Fund, or to a budget category (logged as a refund that reduces that category's Spent total), or dismiss it if it doesn't need tracking.</p>
+          <div id="pending-credits-wrap"></div>
+        </div>
+
+        <div class="card">
           <h2>Planned vs. Spent vs. Remaining</h2>
           <table class="ledger-table" id="ledger-summary-table">
             <thead>
@@ -164,9 +222,18 @@
 
         <div class="card">
           <h2>Recent transactions</h2>
+          <div class="bulk-toolbar" id="tx-bulk-toolbar" style="display:none;">
+            <span id="tx-selected-count" class="hint"></span>
+            <select id="tx-bulk-line-item-select"></select>
+            <button class="btn" id="tx-bulk-apply-btn">Assign Line Item to Selected</button>
+            <button class="btn-ghost" id="tx-bulk-delete-btn">Delete Selected</button>
+          </div>
           <table class="ledger-table" id="transactions-table">
             <thead>
-              <tr><th>Date</th><th>Line item</th><th>Description</th><th>Amount</th><th></th></tr>
+              <tr>
+                <th>Date</th><th>Line item</th><th>Description</th><th>Type</th><th>Amount</th>
+                <th class="tx-checkbox-col"><input type="checkbox" id="tx-select-all" /></th><th></th>
+              </tr>
             </thead>
             <tbody></tbody>
           </table>
@@ -198,8 +265,15 @@
           </form>
         </div>
         <div class="card" id="networth-chart-card" style="display:none;">
-          <h2>Value Over Time by Account</h2>
-          <div class="chart-fixed-height" style="height:150px;">
+          <div class="chart-header-row">
+            <h2>Value Over Time by Account</h2>
+            <div class="year-nav">
+              <button class="btn-ghost" id="networth-year-prev" title="Previous year">&larr;</button>
+              <span id="networth-year-label" class="year-nav-label"></span>
+              <button class="btn-ghost" id="networth-year-next" title="Next year">&rarr;</button>
+            </div>
+          </div>
+          <div class="chart-fixed-height" style="height:188px;">
             <canvas id="networth-accounts-chart"></canvas>
           </div>
         </div>
@@ -230,7 +304,7 @@
           <p class="hint">How closely actual spending is tracking to plan, based on transactions logged so far.</p>
           <div id="adherence-overall" class="adherence-overall"></div>
           <table class="ledger-table left-aligned" id="adherence-table">
-            <thead><tr><th>Group</th><th>Planned</th><th>Spent</th><th>% of Plan Used</th><th>Status</th></tr></thead>
+            <thead><tr><th>Group</th><th>Planned</th><th>Spent</th><th>% of Plan Used</th><th>% of Take-Home</th><th>Status</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -248,7 +322,7 @@
       </div>
 
       <div class="card">
-        <h2>Net Worth: Contributions vs. Market Value</h2>
+        <h2>Net Worth: Contributions vs. Market Value <input type="number" id="networth-history-year" class="year-input" /></h2>
         <canvas id="net-worth-chart" height="195"></canvas>
       </div>
     </section>

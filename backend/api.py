@@ -141,6 +141,15 @@ def apply_budget_preset(preset_id):
     return jsonify({"applied_items": applied}), 200
 
 
+@app.route("/api/settings/<key>", methods=["GET", "PUT"])
+def app_setting(key):
+    if request.method == "PUT":
+        body = request.get_json()
+        db.set_setting(key, body.get("value"))
+        return "", 204
+    return jsonify({"key": key, "value": db.get_setting(key)})
+
+
 # ---------------------------------------------------------------------------
 # Income / Deductions / Investments (feeds the Net Take-Home calculation)
 # ---------------------------------------------------------------------------
@@ -160,6 +169,60 @@ def income():
         return jsonify({"id": new_id}), 201
     month = request.args.get("month")
     return jsonify(db.get_income_summary(month))
+
+
+@app.route("/api/pay_schedule", methods=["GET", "PUT"])
+def pay_schedule():
+    if request.method == "PUT":
+        body = request.get_json()
+        db.save_pay_schedule(
+            annual_income=body.get("annual_income", 0),
+            anchor_date=body.get("anchor_date"),
+            payments_per_year=body.get("payments_per_year", 26),
+        )
+        return "", 204
+    schedule = db.get_pay_schedule()
+    return jsonify(schedule) if schedule else jsonify(None)
+
+
+@app.route("/api/pay_schedule/deductions", methods=["POST"])
+def add_pay_schedule_deduction():
+    body = request.get_json()
+    new_id = db.add_pay_schedule_deduction(body["name"], body.get("amount", 0))
+    return jsonify({"id": new_id}), 201
+
+
+@app.route("/api/pay_schedule/deductions/<int:ded_id>", methods=["PUT", "DELETE"])
+def modify_pay_schedule_deduction(ded_id):
+    if request.method == "DELETE":
+        db.delete("pay_schedule_deductions", ded_id)
+        return "", 204
+    body = request.get_json()
+    db.update("pay_schedule_deductions", ded_id, {"name": body["name"], "amount": body["amount"]})
+    return "", 204
+
+
+@app.route("/api/pay_schedule/investments", methods=["POST"])
+def add_pay_schedule_investment():
+    body = request.get_json()
+    new_id = db.add_pay_schedule_investment(
+        body["name"], body.get("amount", 0), body.get("is_match", False)
+    )
+    return jsonify({"id": new_id}), 201
+
+
+@app.route("/api/pay_schedule/investments/<int:inv_id>", methods=["PUT", "DELETE"])
+def modify_pay_schedule_investment(inv_id):
+    if request.method == "DELETE":
+        db.delete("pay_schedule_investments", inv_id)
+        return "", 204
+    body = request.get_json()
+    db.update(
+        "pay_schedule_investments",
+        inv_id,
+        {"name": body["name"], "amount": body["amount"], "is_match": 1 if body.get("is_match") else 0},
+    )
+    return "", 204
 
 
 @app.route("/api/income/<int:income_id>", methods=["PUT", "DELETE"])
@@ -249,10 +312,59 @@ def transactions():
     return jsonify(rows)
 
 
-@app.route("/api/transactions/<int:tx_id>", methods=["DELETE"])
-def delete_transaction(tx_id):
-    db.delete("transactions", tx_id)
+@app.route("/api/transactions/<int:tx_id>", methods=["PUT", "DELETE"])
+def modify_transaction(tx_id):
+    if request.method == "DELETE":
+        db.delete("transactions", tx_id)
+        return "", 204
+    body = request.get_json()
+    fields = {}
+    for key in ("date", "description", "amount", "type"):
+        if key in body:
+            fields[key] = body[key]
+    if "line_item_id" in body:
+        fields["line_item_id"] = body["line_item_id"]
+    if not fields:
+        return jsonify({"error": "No fields to update."}), 400
+    db.update_transaction(tx_id, fields)
     return "", 204
+
+
+@app.route("/api/transactions/bulk_line_item", methods=["PUT"])
+def bulk_update_transaction_line_item():
+    body = request.get_json()
+    ids = body.get("ids") or []
+    line_item_id = body.get("line_item_id")
+    if not ids:
+        return jsonify({"error": "No transactions selected."}), 400
+    if not line_item_id:
+        return jsonify({"error": "A Line Item is required."}), 400
+    db.bulk_update_transaction_line_item(ids, line_item_id)
+    return jsonify({"updated": len(ids)}), 200
+
+
+@app.route("/api/transactions/bulk_delete", methods=["POST"])
+def bulk_delete_transactions():
+    body = request.get_json()
+    ids = body.get("ids") or []
+    if not ids:
+        return jsonify({"error": "No transactions selected."}), 400
+    db.bulk_delete_transactions(ids)
+    return jsonify({"deleted": len(ids)}), 200
+
+
+@app.route("/api/transactions/import", methods=["POST"])
+def import_transactions():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded."}), 400
+    raw_bytes = request.files["file"].read()
+    try:
+        csv_text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        csv_text = raw_bytes.decode("latin-1")
+
+    result = db.import_transactions_csv(csv_text)
+    return jsonify(result), 200
 
 
 @app.route("/api/ledger_summary")
@@ -265,6 +377,47 @@ def ledger_summary():
         li["spent"] = spent_map.get(li["id"], 0.0)
         li["remaining"] = li["planned_amount"] - li["spent"]
     return jsonify(line_items)
+
+
+# ---------------------------------------------------------------------------
+# Pending Credits — "Credit"-type import rows waiting to be routed into a
+# Sinking Fund or dismissed (see db.import_transactions_csv).
+# ---------------------------------------------------------------------------
+@app.route("/api/pending_credits", methods=["GET"])
+def pending_credits():
+    return jsonify(db.get_pending_credits())
+
+
+@app.route("/api/pending_credits/<int:pending_id>/assign_to_fund", methods=["POST"])
+def assign_pending_credit(pending_id):
+    body = request.get_json()
+    fund_id = body.get("fund_id")
+    if not fund_id:
+        return jsonify({"error": "A Sinking Fund is required."}), 400
+    try:
+        db.assign_pending_credit_to_fund(pending_id, fund_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    return "", 204
+
+
+@app.route("/api/pending_credits/<int:pending_id>/assign_to_line_item", methods=["POST"])
+def assign_pending_credit_to_category(pending_id):
+    body = request.get_json()
+    line_item_id = body.get("line_item_id")
+    if not line_item_id:
+        return jsonify({"error": "A budget category (Line Item) is required."}), 400
+    try:
+        db.assign_pending_credit_to_line_item(pending_id, line_item_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    return "", 204
+
+
+@app.route("/api/pending_credits/<int:pending_id>", methods=["DELETE"])
+def dismiss_pending_credit(pending_id):
+    db.dismiss_pending_credit(pending_id)
+    return "", 204
 
 
 # ---------------------------------------------------------------------------

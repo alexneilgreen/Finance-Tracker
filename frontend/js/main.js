@@ -57,6 +57,59 @@ function currentMonthISO() {
   return new Date().toISOString().slice(0, 7);
 }
 
+/**
+ * Animates progress-bar-style elements growing from 0 to their real width.
+ * Elements must be rendered with style="width:0%" and a data-target-pct
+ * attribute holding the real percentage; this flips them to that value one
+ * frame later so the CSS width transition actually has something to animate
+ * from (setting the final width immediately, in the same paint, produces no
+ * visible transition at all).
+ */
+function animateBarFills(elements) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      elements.forEach((el) => {
+        el.style.width = `${el.dataset.targetPct}%`;
+      });
+    });
+  });
+}
+
+/**
+ * Builds the x-axis date list for a single-year net worth chart: every
+ * contribution/valuation date that actually falls within `year`, plus a
+ * synthetic Jan 1 point (if there's any data before the year started) so
+ * the line starts from the correct carried-forward value instead of
+ * jumping from zero.
+ */
+function computeYearDates(accounts, year) {
+  const allDates = new Set();
+  accounts.forEach((acc) => {
+    acc.contributions.forEach((c) => allDates.add(c.date));
+    acc.valuations.forEach((v) => allDates.add(v.date));
+  });
+  const sorted = [...allDates].sort();
+
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+  const inYear = sorted.filter((d) => d >= yearStart && d <= yearEnd);
+  const hasPriorData = sorted.some((d) => d < yearStart);
+
+  const dates = [...inYear];
+  if (hasPriorData && !dates.includes(yearStart)) {
+    dates.unshift(yearStart);
+  }
+  return dates.sort();
+}
+
+/** Value of one account as of date `d`: latest valuation on/before d, or
+ * the running contribution total if no valuation has been logged yet. */
+function accountValueAt(account, d) {
+  const applicable = account.valuations.filter((v) => v.date <= d);
+  if (applicable.length) return applicable[applicable.length - 1].value;
+  return account.contributions.filter((c) => c.date <= d).reduce((s, c) => s + c.amount, 0);
+}
+
 /* ---------------------------------------------------------------------
    Top-level nav routing (Budget / Track / Report)
    --------------------------------------------------------------------- */
@@ -113,6 +166,50 @@ function initGlobalMonth() {
   });
 }
 
+/**
+ * Programmatically sets the global Ledger Month and refreshes the pages
+ * that depend on it — the same effect as the person changing the picker
+ * by hand. Used by the CSV-import month chips so a multi-month import can
+ * jump straight to a given month's data instead of making the person
+ * click through the picker themselves.
+ */
+function setGlobalMonth(month) {
+  const input = document.getElementById("global-month");
+  input.value = month;
+  App.currentMonth = month;
+  Budget.refresh();
+  Track.refresh();
+}
+
+/* ---------------------------------------------------------------------
+   Color scheme
+   --------------------------------------------------------------------- */
+async function initTheme() {
+  const select = document.getElementById("theme-select");
+
+  let theme = "dark-blue";
+  try {
+    const saved = await apiGet("/api/settings/theme");
+    if (saved && saved.value) theme = saved.value;
+  } catch (err) {
+    // Fall back to the default theme if settings can't be reached.
+  }
+
+  document.documentElement.setAttribute("data-theme", theme);
+  select.value = theme;
+
+  select.addEventListener("change", async () => {
+    const value = select.value;
+    document.documentElement.setAttribute("data-theme", value);
+    try {
+      await apiPut("/api/settings/theme", { value });
+    } catch (err) {
+      // Theme still applies for this session even if saving the
+      // preference fails; nothing further to do here.
+    }
+  });
+}
+
 /* ---------------------------------------------------------------------
    Boot
    --------------------------------------------------------------------- */
@@ -120,6 +217,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initTopNav();
   initSubNav();
   initGlobalMonth();
+  initTheme();
 
   Budget.refresh();
   Track.refresh();

@@ -11,11 +11,13 @@ const Budget = {
 
   async refresh() {
     if (document.getElementById("page-budget").classList.contains("active") === false) return;
+    await this.loadPaySchedule();
     await this.loadIncome();
     await this.loadGroupsAndItems();
     await this.loadPresets();
     this.bindForms();
     this.bindPresetToolbar();
+    this.bindPayScheduleForms();
   },
 
   /* ------------------------- Income strip ------------------------- */
@@ -25,41 +27,50 @@ const Budget = {
   },
 
   renderIncome() {
-    const { income, total_deductions, total_investments, total_match, net_take_home } = this.incomeSummary;
+    const { income, total_deductions, total_investments, total_match, net_take_home, schedule } = this.incomeSummary;
 
     // ---- Income sources (editable amount, deletable) ----
     const incomeList = document.getElementById("income-list");
-    incomeList.innerHTML = income.map((r) => `
+    const scheduleIncomeRow = schedule
+      ? `<div class="row schedule-row"><span class="row-name">Paycheck income (&times;${schedule.payment_count})</span><span class="amt">${formatCurrency(schedule.gross)}</span></div>`
+      : "";
+    incomeList.innerHTML = scheduleIncomeRow + (income.map((r) => `
       <div class="row" data-income-id="${r.id}">
         <span class="row-name">${r.source}</span>
         <input type="number" step="0.01" class="edit-income-amount" value="${r.gross_amount}" data-id="${r.id}" />
         <button class="btn-ghost" data-delete-income="${r.id}">&times;</button>
       </div>
-    `).join("") || `<div class="row"><span class="hint">No income logged yet</span></div>`;
+    `).join("") || (schedule ? "" : `<div class="row"><span class="hint">No income logged yet</span></div>`));
 
     // ---- Deductions (flattened across all income sources this month, editable/deletable) ----
     const allDeductions = income.flatMap((r) => r.deductions);
     const deductionsList = document.getElementById("deductions-list");
-    deductionsList.innerHTML = allDeductions.map((d) => `
+    const scheduleDeductionRow = schedule && schedule.total_deductions > 0
+      ? `<div class="row schedule-row"><span class="row-name">Pay schedule (&times;${schedule.payment_count})</span><span class="amt">${formatCurrency(schedule.total_deductions)}</span></div>`
+      : "";
+    deductionsList.innerHTML = scheduleDeductionRow + (allDeductions.map((d) => `
       <div class="row" data-deduction-id="${d.id}">
         <span class="row-name">${d.name}</span>
         <input type="number" step="0.01" class="edit-deduction-amount" value="${d.amount}" data-id="${d.id}" data-name="${d.name}" />
         <button class="btn-ghost" data-delete-deduction="${d.id}">&times;</button>
       </div>
-    `).join("") || `<div class="row"><span class="hint">None yet</span></div>`;
+    `).join("") || (scheduleDeductionRow ? "" : `<div class="row"><span class="hint">None yet</span></div>`));
     deductionsList.insertAdjacentHTML("beforeend",
       `<div class="row"><span class="row-name"><strong>Total</strong></span><span class="amt">${formatCurrency(total_deductions)}</span></div>`);
 
     // ---- Investments (employee contributions + employer match, editable/deletable) ----
     const allInvestments = income.flatMap((r) => r.investments);
     const investmentsList = document.getElementById("investments-list");
-    investmentsList.innerHTML = allInvestments.map((inv) => `
+    const scheduleInvestmentRow = schedule && (schedule.total_investments > 0 || schedule.total_match > 0)
+      ? `<div class="row schedule-row"><span class="row-name">Pay schedule (&times;${schedule.payment_count})</span><span class="amt">${formatCurrency(schedule.total_investments)}</span></div>`
+      : "";
+    investmentsList.innerHTML = scheduleInvestmentRow + (allInvestments.map((inv) => `
       <div class="row ${inv.is_match ? "match-row" : ""}" data-investment-id="${inv.id}">
         <span class="row-name">${inv.name}</span>
         <input type="number" step="0.01" class="edit-investment-amount" value="${inv.amount}" data-id="${inv.id}" data-name="${inv.name}" data-match="${inv.is_match ? "1" : "0"}" />
         <button class="btn-ghost" data-delete-investment="${inv.id}">&times;</button>
       </div>
-    `).join("") || `<div class="row"><span class="hint">None yet</span></div>`;
+    `).join("") || (scheduleInvestmentRow ? "" : `<div class="row"><span class="hint">None yet</span></div>`));
     investmentsList.insertAdjacentHTML("beforeend",
       `<div class="row"><span class="row-name"><strong>Total (subtracted)</strong></span><span class="amt">${formatCurrency(total_investments)}</span></div>`);
 
@@ -68,10 +79,129 @@ const Budget = {
 
     document.getElementById("net-take-home-figure").textContent = formatCurrency(net_take_home);
 
+    const monthInfo = document.getElementById("pay-schedule-month-info");
+    monthInfo.textContent = schedule
+      ? `${schedule.payment_count} paycheck${schedule.payment_count === 1 ? "" : "s"} this month (${formatCurrency(schedule.per_check_gross)} each)`
+      : "Set an annual income and a known pay date to get started";
+
     // Store the most recent income id so new deduction/investment entries know where to attach.
     this.latestIncomeId = income.length ? income[income.length - 1].id : null;
 
     this.bindIncomeListHandlers();
+  },
+
+  /* ------------------------- Pay Schedule ------------------------- */
+  async loadPaySchedule() {
+    this.paySchedule = await apiGet("/api/pay_schedule");
+    this.renderPaySchedule();
+  },
+
+  renderPaySchedule() {
+    const s = this.paySchedule;
+    document.getElementById("ps-annual-income").value = s ? s.annual_income : "";
+    document.getElementById("ps-anchor-date").value = s ? s.anchor_date || "" : "";
+    document.getElementById("ps-payments-per-year").value = s ? s.payments_per_year : 26;
+
+    const dedList = document.getElementById("ps-deductions-list");
+    const deductions = s ? s.deductions : [];
+    dedList.innerHTML = deductions.map((d) => `
+      <div class="row" data-id="${d.id}">
+        <span class="row-name">${d.name}</span>
+        <input type="number" step="0.01" class="edit-ps-deduction" value="${d.amount}" data-id="${d.id}" data-name="${d.name}" />
+        <button class="btn-ghost" data-delete-ps-deduction="${d.id}">&times;</button>
+      </div>
+    `).join("") || `<div class="row"><span class="hint">None yet</span></div>`;
+
+    const invList = document.getElementById("ps-investments-list");
+    const investments = s ? s.investments : [];
+    invList.innerHTML = investments.map((inv) => `
+      <div class="row ${inv.is_match ? "match-row" : ""}" data-id="${inv.id}">
+        <span class="row-name">${inv.name}</span>
+        <input type="number" step="0.01" class="edit-ps-investment" value="${inv.amount}" data-id="${inv.id}" data-name="${inv.name}" data-match="${inv.is_match ? "1" : "0"}" />
+        <button class="btn-ghost" data-delete-ps-investment="${inv.id}">&times;</button>
+      </div>
+    `).join("") || `<div class="row"><span class="hint">None yet</span></div>`;
+
+    dedList.querySelectorAll(".edit-ps-deduction").forEach((input) => {
+      input.addEventListener("change", async (e) => {
+        await apiPut(`/api/pay_schedule/deductions/${e.target.dataset.id}`, {
+          name: e.target.dataset.name,
+          amount: parseFloat(e.target.value) || 0,
+        });
+        await this.loadPaySchedule();
+        await this.loadIncome();
+      });
+    });
+    dedList.querySelectorAll("[data-delete-ps-deduction]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await apiDelete(`/api/pay_schedule/deductions/${btn.dataset.deletePsDeduction}`);
+        await this.loadPaySchedule();
+        await this.loadIncome();
+      });
+    });
+
+    invList.querySelectorAll(".edit-ps-investment").forEach((input) => {
+      input.addEventListener("change", async (e) => {
+        await apiPut(`/api/pay_schedule/investments/${e.target.dataset.id}`, {
+          name: e.target.dataset.name,
+          amount: parseFloat(e.target.value) || 0,
+          is_match: e.target.dataset.match === "1",
+        });
+        await this.loadPaySchedule();
+        await this.loadIncome();
+      });
+    });
+    invList.querySelectorAll("[data-delete-ps-investment]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await apiDelete(`/api/pay_schedule/investments/${btn.dataset.deletePsInvestment}`);
+        await this.loadPaySchedule();
+        await this.loadIncome();
+      });
+    });
+  },
+
+  bindPayScheduleForms() {
+    if (this._psBound) return;
+    this._psBound = true;
+
+    document.getElementById("pay-schedule-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await apiPut("/api/pay_schedule", {
+        annual_income: parseFloat(document.getElementById("ps-annual-income").value) || 0,
+        anchor_date: document.getElementById("ps-anchor-date").value || null,
+        payments_per_year: parseInt(document.getElementById("ps-payments-per-year").value, 10) || 26,
+      });
+      await this.loadPaySchedule();
+      await this.loadIncome();
+      this.renderAssignTotals();
+    });
+
+    document.getElementById("ps-deduction-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      await apiPost("/api/pay_schedule/deductions", {
+        name: fd.get("name"),
+        amount: parseFloat(fd.get("amount")) || 0,
+      });
+      e.target.reset();
+      await this.loadPaySchedule();
+      await this.loadIncome();
+      this.renderAssignTotals();
+    });
+
+    document.getElementById("ps-investment-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      await apiPost("/api/pay_schedule/investments", {
+        name: fd.get("name"),
+        amount: parseFloat(fd.get("amount")) || 0,
+        is_match: fd.get("is_match") === "on",
+      });
+      e.target.reset();
+      await this.loadPaySchedule();
+      await this.loadIncome();
+      this.renderAssignTotals();
+    });
   },
 
   bindIncomeListHandlers() {
@@ -230,72 +360,6 @@ const Budget = {
   bindForms() {
     if (this._bound) return;
     this._bound = true;
-
-    document.getElementById("income-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      await apiPost("/api/income", {
-        month: App.currentMonth,
-        source: fd.get("source"),
-        gross_amount: parseFloat(fd.get("gross_amount")) || 0,
-        pay_date: todayISO(),
-      });
-      e.target.reset();
-      await this.loadIncome();
-      this.renderAssignTotals();
-    });
-
-    document.getElementById("deduction-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      if (!this.latestIncomeId) { alert("Add an income entry first."); return; }
-      const fd = new FormData(e.target);
-      await apiPost(`/api/income/${this.latestIncomeId}/deductions`, {
-        name: fd.get("name"),
-        amount: parseFloat(fd.get("amount")) || 0,
-      });
-      e.target.reset();
-      await this.loadIncome();
-      this.renderAssignTotals();
-    });
-
-    // Show/hide the match-amount field alongside the checkbox
-    const hasMatchCheckbox = document.getElementById("has-match-checkbox");
-    const matchAmountInput = document.getElementById("match-amount-input");
-    hasMatchCheckbox.addEventListener("change", () => {
-      matchAmountInput.style.display = hasMatchCheckbox.checked ? "" : "none";
-      matchAmountInput.required = hasMatchCheckbox.checked;
-      if (!hasMatchCheckbox.checked) matchAmountInput.value = "";
-    });
-
-    document.getElementById("investment-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      if (!this.latestIncomeId) { alert("Add an income entry first."); return; }
-      const fd = new FormData(e.target);
-      const name = fd.get("name");
-      const hasMatch = fd.get("has_match") === "on";
-
-      // Your own contribution: subtracted from Net Take-Home.
-      await apiPost(`/api/income/${this.latestIncomeId}/investments`, {
-        name,
-        amount: parseFloat(fd.get("amount")) || 0,
-        is_match: false,
-      });
-
-      // Employer match, logged as a second line item: tracked, not subtracted.
-      if (hasMatch) {
-        await apiPost(`/api/income/${this.latestIncomeId}/investments`, {
-          name: `${name} (Employer Match)`,
-          amount: parseFloat(fd.get("match_amount")) || 0,
-          is_match: true,
-        });
-      }
-
-      e.target.reset();
-      matchAmountInput.style.display = "none";
-      matchAmountInput.required = false;
-      await this.loadIncome();
-      this.renderAssignTotals();
-    });
 
     document.getElementById("group-form").addEventListener("submit", async (e) => {
       e.preventDefault();

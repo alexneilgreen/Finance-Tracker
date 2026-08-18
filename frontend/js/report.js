@@ -98,6 +98,9 @@ const Report = {
   /* ---------------------- Budget adherence ---------------------- */
   async renderAdherence() {
     const data = await apiGet(`/api/report/monthly_spending?month=${App.currentMonth}`);
+    const income = await apiGet(`/api/income?month=${App.currentMonth}`);
+    const netTakeHome = income.net_take_home || 0;
+
     const plannedSum = data.reduce((s, g) => s + g.planned, 0);
     const spentSum = data.reduce((s, g) => s + g.spent, 0);
     const overallPct = plannedSum > 0 ? (spentSum / plannedSum) * 100 : 0;
@@ -105,14 +108,18 @@ const Report = {
     const overallWrap = document.getElementById("adherence-overall");
     const barColor = overallPct > 100 ? "var(--negative)" : overallPct >= 90 ? "var(--brass)" : "var(--positive)";
     overallWrap.innerHTML = `
-      <span class="big-pct">${overallPct.toFixed(0)}%</span>
-      <div class="adherence-bar-track"><div class="adherence-bar-fill" style="width:${Math.min(100, overallPct)}%; background:${barColor}"></div></div>
-      <span class="hint">of planned budget used so far (${formatCurrency(spentSum)} of ${formatCurrency(plannedSum)})</span>
+      <div class="adherence-top-row">
+        <span class="big-pct">${overallPct.toFixed(0)}%</span>
+        <div class="adherence-bar-track"><div class="adherence-bar-fill" style="width:0%; background:${barColor}" data-target-pct="${Math.min(100, overallPct)}"></div></div>
+      </div>
+      <p class="hint">of planned budget used so far (${formatCurrency(spentSum)} of ${formatCurrency(plannedSum)})</p>
     `;
+    animateBarFills(overallWrap.querySelectorAll(".adherence-bar-fill"));
 
     const tbody = document.querySelector("#adherence-table tbody");
     tbody.innerHTML = data.map((g) => {
       const pct = g.planned > 0 ? (g.spent / g.planned) * 100 : (g.spent > 0 ? 100 : 0);
+      const pctOfTakeHome = netTakeHome > 0 ? (g.spent / netTakeHome) * 100 : 0;
       let statusClass = "under", statusLabel = "On track";
       if (pct > 100) { statusClass = "over"; statusLabel = "Over"; }
       else if (pct >= 90) { statusClass = "near"; statusLabel = "Near limit"; }
@@ -122,10 +129,11 @@ const Report = {
           <td class="num">${formatCurrency(g.planned)}</td>
           <td class="num">${formatCurrency(g.spent)}</td>
           <td class="num">${pct.toFixed(0)}%</td>
+          <td class="num">${pctOfTakeHome.toFixed(1)}%</td>
           <td><span class="status-pill ${statusClass}">${statusLabel}</span></td>
         </tr>
       `;
-    }).join("") || `<tr><td colspan="5" class="hint">No budget groups for this month yet.</td></tr>`;
+    }).join("") || `<tr><td colspan="6" class="hint">No budget groups for this month yet.</td></tr>`;
   },
 
   /* ---------------------- Zero-based budget flow: hand-rolled SVG Sankey ---------------------- */
@@ -270,22 +278,46 @@ const Report = {
   },
 
   bindYearInput() {
-    const input = document.getElementById("trend-year");
-    if (input.dataset.bound) return;
-    input.dataset.bound = "true";
-    input.addEventListener("change", () => this.renderAnnualTrend());
+    const trendInput = document.getElementById("trend-year");
+    if (!trendInput.dataset.bound) {
+      trendInput.dataset.bound = "true";
+      trendInput.addEventListener("change", () => this.renderAnnualTrend());
+    }
+
+    const netWorthInput = document.getElementById("networth-history-year");
+    if (!netWorthInput.dataset.bound) {
+      netWorthInput.dataset.bound = "true";
+      netWorthInput.value = netWorthInput.value || new Date().getFullYear();
+      netWorthInput.addEventListener("change", () => this.renderNetWorthHistory());
+    }
   },
 
-  /* ---------------------- Net worth history ---------------------- */
+  /* ---------------------- Net worth history (single year, contributed vs value) ---------------------- */
   async renderNetWorthHistory() {
-    const accounts = await apiGet("/api/report/net_worth_history");
+    const yearInput = document.getElementById("networth-history-year");
+    const year = yearInput.value || new Date().getFullYear();
+    yearInput.value = year;
 
-    const allDates = new Set();
-    accounts.forEach((acc) => {
-      acc.contributions.forEach((c) => allDates.add(c.date));
-      acc.valuations.forEach((v) => allDates.add(v.date));
-    });
-    const dates = [...allDates].sort();
+    const accounts = await apiGet("/api/report/net_worth_history");
+    const dates = computeYearDates(accounts, year);
+
+    const ctx = document.getElementById("net-worth-chart");
+    if (!dates.length) {
+      if (this.netWorthChart) { this.netWorthChart.destroy(); this.netWorthChart = null; }
+      ctx.style.display = "none";
+      let emptyMsg = document.getElementById("net-worth-chart-empty");
+      if (!emptyMsg) {
+        emptyMsg = document.createElement("p");
+        emptyMsg.id = "net-worth-chart-empty";
+        emptyMsg.className = "hint";
+        ctx.after(emptyMsg);
+      }
+      emptyMsg.textContent = `No account activity in ${year}.`;
+      return;
+    }
+    ctx.style.display = "";
+    const emptyMsg = document.getElementById("net-worth-chart-empty");
+    if (emptyMsg) emptyMsg.remove();
 
     const contributedSeries = dates.map((d) => {
       let total = 0;
@@ -295,21 +327,10 @@ const Report = {
       return total;
     });
 
-    const valueSeries = dates.map((d) => {
-      let total = 0;
-      accounts.forEach((acc) => {
-        const applicable = acc.valuations.filter((v) => v.date <= d);
-        if (applicable.length) {
-          total += applicable[applicable.length - 1].value;
-        } else {
-          const contribs = acc.contributions.filter((c) => c.date <= d);
-          total += contribs.reduce((s, c) => s + c.amount, 0);
-        }
-      });
-      return total;
-    });
+    const valueSeries = dates.map((d) =>
+      accounts.reduce((total, acc) => total + accountValueAt(acc, d), 0)
+    );
 
-    const ctx = document.getElementById("net-worth-chart");
     if (this.netWorthChart) this.netWorthChart.destroy();
     this.netWorthChart = new Chart(ctx, {
       type: "line",

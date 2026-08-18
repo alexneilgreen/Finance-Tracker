@@ -42,6 +42,43 @@ def _fmt(n):
     return f"${n:,.2f}"
 
 
+def _year_dates(accounts, year):
+    """Same logic as the frontend's computeYearDates(): every contribution/
+    valuation date actually within `year`, plus a synthetic Jan 1 point (if
+    there's data from before the year) so lines start from the correct
+    carried-forward value instead of jumping from zero."""
+    all_dates = sorted(
+        {c["date"] for a in accounts for c in a["contributions"]}
+        | {v["date"] for a in accounts for v in a["valuations"]}
+    )
+    year_start = f"{year}-01-01"
+    year_end = f"{year}-12-31"
+    in_year = [d for d in all_dates if year_start <= d <= year_end]
+    has_prior = any(d < year_start for d in all_dates)
+
+    dates = list(in_year)
+    if has_prior and year_start not in dates:
+        dates.append(year_start)
+    return sorted(dates)
+
+
+def _account_value_at(account, d):
+    """Value of one account as of date d: latest valuation on/before d, or
+    the running contribution total if no valuation has been logged yet."""
+    applicable = [v for v in account["valuations"] if v["date"] <= d]
+    if applicable:
+        return applicable[-1]["value"]
+    return sum(c["amount"] for c in account["contributions"] if c["date"] <= d)
+
+
+def _style_axes(ax):
+    ax.set_facecolor("white")
+    ax.grid(color=GRID, linewidth=0.6)
+    ax.tick_params(colors=TEXT_MUTED, labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_color(GRID)
+
+
 def _draw_donut(ax, groups, net_take_home):
     ax.set_title("Monthly Spending", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
     if net_take_home <= 0:
@@ -237,16 +274,16 @@ def _build_annual_charts_page(pdf, year):
     group_names = sorted({r["group_name"] for r in rows})
 
     accounts = db.get_net_worth_history()
-    all_dates = sorted(
-        {c["date"] for a in accounts for c in a["contributions"]}
-        | {v["date"] for a in accounts for v in a["valuations"]}
-    )
+    dates = _year_dates(accounts, year)
 
-    fig, (ax_trend, ax_net_worth) = plt.subplots(2, 1, figsize=(11, 8.5))
+    # Portrait rather than the month pages' landscape orientation — three
+    # stacked charts need more vertical room than a landscape page gives.
+    fig, (ax_trend, ax_net_worth, ax_by_account) = plt.subplots(3, 1, figsize=(8.5, 11))
     fig.patch.set_facecolor("white")
     fig.suptitle(f"{year} \u2014 Annual Trend & Net Worth", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
-    fig.subplots_adjust(left=0.08, right=0.96, top=0.88, bottom=0.1, hspace=0.5)
+    fig.subplots_adjust(left=0.10, right=0.94, top=0.91, bottom=0.06, hspace=0.6)
 
+    # ---- Annual Trend (spending by group, across all 12 months) ----
     ax_trend.set_title("Annual Trend", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
     if group_names:
         for i, name in enumerate(group_names):
@@ -255,41 +292,39 @@ def _build_annual_charts_page(pdf, year):
                 match = next((r for r in rows if r["month_num"] == m and r["group_name"] == name), None)
                 series.append(match["total"] if match else 0)
             ax_trend.plot(month_labels, series, label=name, color=PALETTE[i % len(PALETTE)], linewidth=1.8)
-        ax_trend.legend(fontsize=7, frameon=False, ncol=4)
+        ax_trend.legend(fontsize=6.5, frameon=False, ncol=3)
     else:
         ax_trend.text(0.5, 0.5, "No spending recorded this year", ha="center", va="center", color=TEXT_MUTED)
-    ax_trend.set_facecolor("white")
-    ax_trend.grid(color=GRID, linewidth=0.6)
-    ax_trend.tick_params(colors=TEXT_MUTED, labelsize=7)
-    for spine in ax_trend.spines.values():
-        spine.set_color(GRID)
+    _style_axes(ax_trend)
 
+    # ---- Net Worth: Contributions vs. Market Value (aggregate, this year) ----
     ax_net_worth.set_title("Net Worth: Contributions vs. Market Value", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
-    if all_dates:
-        contributed_series, value_series = [], []
-        for d in all_dates:
-            total_contrib = sum(c["amount"] for a in accounts for c in a["contributions"] if c["date"] <= d)
-            total_value = 0.0
-            for a in accounts:
-                applicable = [v for v in a["valuations"] if v["date"] <= d]
-                if applicable:
-                    total_value += applicable[-1]["value"]
-                else:
-                    total_value += sum(c["amount"] for c in a["contributions"] if c["date"] <= d)
-            contributed_series.append(total_contrib)
-            value_series.append(total_value)
-        ax_net_worth.plot(all_dates, contributed_series, label="Contributed", color=TEXT_MUTED, linestyle="--", linewidth=1.5)
-        ax_net_worth.plot(all_dates, value_series, label="Market Value", color=PALETTE[0], linewidth=1.8)
-        ax_net_worth.fill_between(all_dates, value_series, color=PALETTE[0], alpha=0.08)
+    if dates:
+        contributed_series = [
+            sum(c["amount"] for a in accounts for c in a["contributions"] if c["date"] <= d)
+            for d in dates
+        ]
+        value_series = [sum(_account_value_at(a, d) for a in accounts) for d in dates]
+        ax_net_worth.plot(dates, contributed_series, label="Contributed", color=TEXT_MUTED, linestyle="--", linewidth=1.5)
+        ax_net_worth.plot(dates, value_series, label="Market Value", color=PALETTE[0], linewidth=1.8)
+        ax_net_worth.fill_between(dates, value_series, color=PALETTE[0], alpha=0.08)
         ax_net_worth.legend(fontsize=7, frameon=False)
-        ax_net_worth.tick_params(axis="x", rotation=45, labelsize=6.5)
+        ax_net_worth.tick_params(axis="x", rotation=30, labelsize=6)
     else:
-        ax_net_worth.text(0.5, 0.5, "No account history logged yet", ha="center", va="center", color=TEXT_MUTED)
-    ax_net_worth.set_facecolor("white")
-    ax_net_worth.grid(color=GRID, linewidth=0.6)
-    ax_net_worth.tick_params(colors=TEXT_MUTED, labelsize=7)
-    for spine in ax_net_worth.spines.values():
-        spine.set_color(GRID)
+        ax_net_worth.text(0.5, 0.5, f"No account activity in {year}", ha="center", va="center", color=TEXT_MUTED)
+    _style_axes(ax_net_worth)
+
+    # ---- Value Over Time by Account (per-account, this year) ----
+    ax_by_account.set_title("Value Over Time by Account", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
+    if dates and accounts:
+        for i, a in enumerate(accounts):
+            series = [_account_value_at(a, d) for d in dates]
+            ax_by_account.plot(dates, series, label=a["name"], color=PALETTE[i % len(PALETTE)], linewidth=1.8)
+        ax_by_account.legend(fontsize=6.5, frameon=False, ncol=2)
+        ax_by_account.tick_params(axis="x", rotation=30, labelsize=6)
+    else:
+        ax_by_account.text(0.5, 0.5, f"No account activity in {year}", ha="center", va="center", color=TEXT_MUTED)
+    _style_axes(ax_by_account)
 
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
