@@ -102,6 +102,12 @@ const Budget = {
     document.getElementById("ps-anchor-date").value = s ? s.anchor_date || "" : "";
     document.getElementById("ps-payments-per-year").value = s ? s.payments_per_year : 26;
 
+    const hasEnd = !!(s && s.end_date);
+    document.getElementById("ps-start-date").value = s ? s.start_date || "" : "";
+    document.getElementById("ps-end-date").value = hasEnd ? s.end_date : "";
+    document.getElementById("ps-ongoing").checked = !hasEnd;
+    document.getElementById("ps-end-date").disabled = !hasEnd;
+
     const dedList = document.getElementById("ps-deductions-list");
     const deductions = s ? s.deductions : [];
     dedList.innerHTML = deductions.map((d) => `
@@ -166,10 +172,13 @@ const Budget = {
 
     document.getElementById("pay-schedule-form").addEventListener("submit", async (e) => {
       e.preventDefault();
+      const s = this.paySchedule || {};
       await apiPut("/api/pay_schedule", {
         annual_income: parseFloat(document.getElementById("ps-annual-income").value) || 0,
         anchor_date: document.getElementById("ps-anchor-date").value || null,
         payments_per_year: parseInt(document.getElementById("ps-payments-per-year").value, 10) || 26,
+        start_date: s.start_date || null,
+        end_date: s.end_date || null,
       });
       await this.loadPaySchedule();
       await this.loadIncome();
@@ -198,6 +207,28 @@ const Budget = {
         is_match: fd.get("is_match") === "on",
       });
       e.target.reset();
+      await this.loadPaySchedule();
+      await this.loadIncome();
+      this.renderAssignTotals();
+    });
+
+    document.getElementById("ps-ongoing").addEventListener("change", (e) => {
+      const endInput = document.getElementById("ps-end-date");
+      endInput.disabled = e.target.checked;
+      if (e.target.checked) endInput.value = "";
+    });
+
+    document.getElementById("ps-dates-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const s = this.paySchedule || {};
+      const ongoing = document.getElementById("ps-ongoing").checked;
+      await apiPut("/api/pay_schedule", {
+        annual_income: s.annual_income || 0,
+        anchor_date: s.anchor_date || null,
+        payments_per_year: s.payments_per_year || 26,
+        start_date: document.getElementById("ps-start-date").value || null,
+        end_date: ongoing ? null : (document.getElementById("ps-end-date").value || null),
+      });
       await this.loadPaySchedule();
       await this.loadIncome();
       this.renderAssignTotals();
@@ -367,6 +398,19 @@ const Budget = {
       await apiPost("/api/budget/groups", { name: fd.get("name"), sort_order: this.groups.length });
       e.target.reset();
       await this.loadGroupsAndItems();
+    });
+
+    document.getElementById("income-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      await apiPost("/api/income", {
+        month: App.currentMonth,
+        source: fd.get("source"),
+        gross_amount: parseFloat(fd.get("gross_amount")) || 0,
+      });
+      e.target.reset();
+      await this.loadIncome();
+      this.renderAssignTotals();
     });
   },
 

@@ -110,6 +110,56 @@ function accountValueAt(account, d) {
   return account.contributions.filter((c) => c.date <= d).reduce((s, c) => s + c.amount, 0);
 }
 
+/**
+ * Saves a Blob to disk. A plain <a download> / blob-URL click has no
+ * browser download manager to catch it inside PyWebView's chromeless
+ * window, so that approach silently goes nowhere there — the JS API
+ * bridge (window.pywebview.api.save_file) is the reliable path. Falls
+ * back to a normal browser download when running outside PyWebView
+ * (e.g. during development in a regular browser tab).
+ */
+async function saveBlobAsFile(blob, filename) {
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.save_file) {
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    return window.pywebview.api.save_file(base64, filename);
+  }
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  return { saved: true, path: filename };
+}
+
+/**
+ * Exports any report table to a real .xlsx via the backend's generic
+ * pandas/openpyxl export endpoint — used for computed report tables
+ * (Budget Adherence, Multi-Year Comparison, Savings Rate, Debt Payoff
+ * Plan...) that don't exist as a single raw DB table the way transactions
+ * or accounts do. `headers` is an array of column names; `rows` is an
+ * array of arrays (or objects — plain values work fine as an object's
+ * values array via Object.values if the caller prefers). `format` can be
+ * "xlsx" (default) or "csv".
+ */
+async function exportRowsAsExcel(headers, rows, filenameBase, sheetName, format = "xlsx") {
+  const res = await fetch("/api/export/generic", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ headers, rows, filename: filenameBase, sheet_name: sheetName || filenameBase, format }),
+  });
+  if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+  const blob = await res.blob();
+  return saveBlobAsFile(blob, `${filenameBase}.${format === "csv" ? "csv" : "xlsx"}`);
+}
+
 /* ---------------------------------------------------------------------
    Top-level nav routing (Budget / Track / Report)
    --------------------------------------------------------------------- */
@@ -147,6 +197,7 @@ function initSubNav() {
       if (tab.dataset.subpage === "ledger") Track.refreshLedger();
       if (tab.dataset.subpage === "sinking") Track.refreshFunds();
       if (tab.dataset.subpage === "networth") Track.refreshAccounts();
+      if (tab.dataset.subpage === "debts") Track.refreshDebts();
     });
   });
 }
@@ -211,6 +262,70 @@ async function initTheme() {
 }
 
 /* ---------------------------------------------------------------------
+   Collapsible cards (Pay Schedule, Log a transaction, Import Transactions,
+   New sinking fund/goal, New account) — each starts minimized; its own
+   toggle button only ever affects that one card's .card-content.
+   --------------------------------------------------------------------- */
+function initCollapsibleCards() {
+  document.querySelectorAll("[data-card-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const card = btn.closest(".card");
+      const collapsed = card.classList.toggle("collapsed");
+      btn.textContent = collapsed ? "+" : "\u2212";
+      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    });
+  });
+}
+
+/* ---------------------------------------------------------------------
+   Import a full database backup (.xlsx from the Report page's Export to
+   Excel) — destructive, so this requires an explicit confirmation before
+   it touches anything, then reloads the whole app once it's done since
+   virtually every page's data could have just changed underneath it.
+   --------------------------------------------------------------------- */
+function initImportBackup() {
+  const btn = document.getElementById("import-backup-btn");
+  const fileInput = document.getElementById("import-backup-file-input");
+
+  btn.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    const confirmed = confirm(
+      "Importing a backup REPLACES existing data for every table found in the file. " +
+      "This can't be undone. Are you sure you want to continue?"
+    );
+    if (!confirmed) {
+      fileInput.value = "";
+      return;
+    }
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Importing...";
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/backup/import", { method: "POST", body: formData });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || `Server returned ${res.status}`);
+
+      alert(`Import complete — restored ${result.tables_restored.length} table(s). Reloading the app now.`);
+      window.location.reload();
+    } catch (err) {
+      alert(`Import failed: ${err.message}`);
+      btn.disabled = false;
+      btn.textContent = originalText;
+    } finally {
+      fileInput.value = "";
+    }
+  });
+}
+
+/* ---------------------------------------------------------------------
    Boot
    --------------------------------------------------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
@@ -218,6 +333,8 @@ document.addEventListener("DOMContentLoaded", () => {
   initSubNav();
   initGlobalMonth();
   initTheme();
+  initCollapsibleCards();
+  initImportBackup();
 
   Budget.refresh();
   Track.refresh();

@@ -179,6 +179,8 @@ def pay_schedule():
             annual_income=body.get("annual_income", 0),
             anchor_date=body.get("anchor_date"),
             payments_per_year=body.get("payments_per_year", 26),
+            start_date=body.get("start_date"),
+            end_date=body.get("end_date"),
         )
         return "", 204
     schedule = db.get_pay_schedule()
@@ -309,6 +311,26 @@ def transactions():
     where = "strftime('%Y-%m', date) = ?" if month else "1=1"
     params = (month,) if month else ()
     rows = db.fetch_all("transactions", where + " ORDER BY date DESC", params)
+    return jsonify(rows)
+
+
+@app.route("/api/transactions/search")
+def search_transactions():
+    q = request.args.get("q") or None
+    date_from = request.args.get("date_from") or None
+    date_to = request.args.get("date_to") or None
+    line_item_id = request.args.get("line_item_id")
+    tx_type = request.args.get("type") or None
+    min_amount = request.args.get("min_amount")
+    max_amount = request.args.get("max_amount")
+
+    rows = db.search_transactions(
+        q=q, date_from=date_from, date_to=date_to,
+        line_item_id=int(line_item_id) if line_item_id else None,
+        tx_type=tx_type,
+        min_amount=float(min_amount) if min_amount not in (None, "") else None,
+        max_amount=float(max_amount) if max_amount not in (None, "") else None,
+    )
     return jsonify(rows)
 
 
@@ -493,6 +515,20 @@ def delete_account(account_id):
     return "", 204
 
 
+@app.route("/api/accounts/<int:account_id>/import_csv", methods=["POST"])
+def import_account_csv(account_id):
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded."}), 400
+    raw_bytes = request.files["file"].read()
+    try:
+        csv_text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        csv_text = raw_bytes.decode("latin-1")
+
+    result = db.import_account_csv(account_id, csv_text)
+    return jsonify(result), 200
+
+
 @app.route("/api/accounts/<int:account_id>/contributions", methods=["POST"])
 def add_contribution(account_id):
     body = request.get_json()
@@ -534,6 +570,82 @@ def modify_valuation(valuation_id):
 
 
 # ---------------------------------------------------------------------------
+# PAGE 2 / TAB D — DEBT PAYOFF TRACKER
+# ---------------------------------------------------------------------------
+@app.route("/api/debts", methods=["GET", "POST"])
+def debts():
+    if request.method == "POST":
+        body = request.get_json()
+        new_id = db.insert(
+            "debts",
+            {
+                "name": body["name"],
+                "debt_type": body.get("debt_type", "Loan"),
+                "is_revolving": 1 if body.get("is_revolving") else 0,
+                "current_balance": body.get("current_balance", 0),
+                "apr": body.get("apr", 0),
+                "minimum_payment": body.get("minimum_payment", 0),
+                "original_principal": body.get("original_principal"),
+                "original_term_months": body.get("original_term_months"),
+                "start_date": body.get("start_date"),
+                "escrow_amount": body.get("escrow_amount", 0),
+            },
+        )
+        return jsonify({"id": new_id}), 201
+    return jsonify(db.get_debts())
+
+
+@app.route("/api/debts/<int:debt_id>", methods=["PUT", "DELETE"])
+def modify_debt(debt_id):
+    if request.method == "DELETE":
+        db.delete("debts", debt_id)
+        return "", 204
+    body = request.get_json()
+    fields = {}
+    for key in ("name", "debt_type", "current_balance", "apr", "minimum_payment",
+                "original_principal", "original_term_months", "start_date", "escrow_amount"):
+        if key in body:
+            fields[key] = body[key]
+    if "is_revolving" in body:
+        fields["is_revolving"] = 1 if body["is_revolving"] else 0
+    if not fields:
+        return jsonify({"error": "No fields to update."}), 400
+    db.update("debts", debt_id, fields)
+    return "", 204
+
+
+@app.route("/api/debts/<int:debt_id>/payments", methods=["POST"])
+def add_debt_payment(debt_id):
+    body = request.get_json()
+    try:
+        result = db.add_debt_payment(debt_id, body["date"], body["amount"])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result), 201
+
+
+@app.route("/api/debt_payments/<int:payment_id>", methods=["DELETE"])
+def delete_debt_payment(payment_id):
+    db.delete("debt_payments", payment_id)
+    return "", 204
+
+
+@app.route("/api/debts/<int:debt_id>/summary")
+def debt_summary(debt_id):
+    try:
+        return jsonify(db.get_debt_summary(debt_id))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+
+@app.route("/api/debt_payoff_plan")
+def debt_payoff_plan():
+    strategy = request.args.get("strategy", "avalanche")
+    extra_monthly = float(request.args.get("extra_monthly", 0) or 0)
+    return jsonify(db.get_debt_payoff_plan(strategy=strategy, extra_monthly=extra_monthly))
+
+
+# ---------------------------------------------------------------------------
 # PAGE 3 — REPORTS
 # ---------------------------------------------------------------------------
 @app.route("/api/report/monthly_spending")
@@ -554,6 +666,21 @@ def report_budget_flow():
 def report_annual_trend():
     year = request.args.get("year")
     return jsonify(db.get_annual_trend(year))
+
+
+@app.route("/api/report/multi_year_trend")
+def report_multi_year_trend():
+    years_param = request.args.get("years", "")
+    years = [y.strip() for y in years_param.split(",") if y.strip()]
+    if not years:
+        return jsonify({"error": "Provide at least one year, e.g. ?years=2025,2026"}), 400
+    return jsonify(db.get_multi_year_trend(years))
+
+
+@app.route("/api/report/savings_rate")
+def report_savings_rate():
+    year = request.args.get("year")
+    return jsonify(db.get_savings_rate_series(year))
 
 
 @app.route("/api/report/net_worth_history")
@@ -609,4 +736,99 @@ def export_table(table):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
         download_name=f"{table}.xlsx",
+    )
+
+
+@app.route("/api/backup/export")
+def export_full_backup():
+    """
+    The comprehensive "Export to Excel" — one workbook, one sheet per table,
+    covering Budget + Track + Report data (everything BACKUP_TABLES lists).
+    This exact file format is also what /api/backup/import expects back.
+    """
+    sheets = db.get_full_backup_data()
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for sheet_name, headers, rows in sheets:
+            df = pd.DataFrame(rows, columns=headers)
+            df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+    buffer.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        buffer,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"ledger_full_backup_{stamp}.xlsx",
+    )
+
+
+@app.route("/api/backup/import", methods=["POST"])
+def import_full_backup():
+    """Restores the database from a workbook produced by /api/backup/export.
+    Destructive for any sheet/table it recognizes — see
+    db.import_full_backup_data() for exactly what that means."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded."}), 400
+    raw_bytes = request.files["file"].read()
+
+    try:
+        all_sheets_df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=None, engine="openpyxl")
+    except Exception as e:
+        return jsonify({"error": f"Couldn't read that file as an Excel workbook: {e}"}), 400
+
+    # Map each table's human-readable headers back to raw column names.
+    header_lookup = {}
+    for sheet_name, table, columns in db.BACKUP_TABLES:
+        labels = [db._COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in columns]
+        header_lookup[sheet_name] = dict(zip(labels, columns))
+
+    sheets = {}
+    for sheet_name, sheet_df in all_sheets_df.items():
+        if sheet_name not in header_lookup:
+            continue
+        sheet_df = sheet_df.rename(columns=header_lookup[sheet_name])
+        sheets[sheet_name] = sheet_df.where(pd.notnull(sheet_df), None).to_dict("records")
+
+    try:
+        result = db.import_full_backup_data(sheets)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(result)
+
+
+@app.route("/api/export/generic", methods=["POST"])
+def export_generic():
+    """
+    Same Excel/CSV export as /api/export/<table>, but for computed report
+    tables that don't exist as a single raw DB table (Budget Adherence,
+    Multi-Year Comparison, Savings Rate, Debt Payoff Plan, etc.) -- the
+    frontend already has the rendered rows in hand, so it just posts them
+    here rather than the backend re-deriving each report a second time.
+    Body: { headers: [...], rows: [[...], ...], filename, sheet_name, format }
+    """
+    body = request.get_json()
+    headers = body.get("headers") or None
+    rows = body.get("rows") or []
+    filename = (body.get("filename") or "export").strip() or "export"
+    sheet_name = (body.get("sheet_name") or "Sheet1")[:31]
+    fmt = body.get("format", "xlsx")
+
+    df = pd.DataFrame(rows, columns=headers) if headers else pd.DataFrame(rows)
+
+    buffer = io.BytesIO()
+    if fmt == "csv":
+        df.to_csv(buffer, index=False)
+        buffer.seek(0)
+        return send_file(buffer, mimetype="text/csv", as_attachment=True,
+                          download_name=f"{filename}.csv")
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"{filename}.xlsx",
     )

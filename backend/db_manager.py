@@ -10,6 +10,9 @@ import sqlite3
 import csv
 import hashlib
 import io
+import calendar
+import math
+import statistics
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from contextlib import contextmanager
@@ -100,19 +103,45 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 
 CREATE TABLE IF NOT EXISTS contributions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id  INTEGER NOT NULL,
-    date        TEXT NOT NULL,
-    amount      REAL NOT NULL,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id   INTEGER NOT NULL,
+    date         TEXT NOT NULL,
+    amount       REAL NOT NULL,
+    import_hash  TEXT,                     -- dedupes re-imported CSV rows; NULL for manual entries
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS valuations (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id  INTEGER NOT NULL,
-    date        TEXT NOT NULL,
-    value       REAL NOT NULL,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id   INTEGER NOT NULL,
+    date         TEXT NOT NULL,
+    value        REAL NOT NULL,
+    import_hash  TEXT,                     -- dedupes re-imported CSV rows; NULL for manual entries
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS debts (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                  TEXT NOT NULL,
+    debt_type             TEXT NOT NULL DEFAULT 'Loan',  -- Mortgage, Auto Loan, Student Loan, Credit Card, Personal Loan, Other
+    is_revolving          INTEGER NOT NULL DEFAULT 0,     -- 1 = credit-card-style (no fixed term/payoff formula)
+    current_balance       REAL NOT NULL DEFAULT 0,
+    apr                   REAL NOT NULL DEFAULT 0,        -- e.g. 6.5 for 6.5%
+    minimum_payment       REAL NOT NULL DEFAULT 0,
+    original_principal    REAL,                            -- optional, for reference only
+    original_term_months  INTEGER,                          -- optional, for reference only
+    start_date            TEXT,                             -- optional, 'YYYY-MM-DD'
+    escrow_amount         REAL NOT NULL DEFAULT 0          -- mortgage taxes/insurance folded into payment, excluded from amortization
+);
+
+CREATE TABLE IF NOT EXISTS debt_payments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    debt_id    INTEGER NOT NULL,
+    date       TEXT NOT NULL,
+    amount     REAL NOT NULL,     -- total payment amount (principal + interest, excl. escrow)
+    principal  REAL NOT NULL DEFAULT 0,
+    interest   REAL NOT NULL DEFAULT 0,
+    FOREIGN KEY (debt_id) REFERENCES debts(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS pending_credits (
@@ -159,7 +188,9 @@ CREATE TABLE IF NOT EXISTS pay_schedule (
     id                 INTEGER PRIMARY KEY CHECK (id = 1),  -- singleton row
     annual_income      REAL NOT NULL DEFAULT 0,
     anchor_date        TEXT,                      -- a known pay date, 'YYYY-MM-DD'
-    payments_per_year  INTEGER NOT NULL DEFAULT 26
+    payments_per_year  INTEGER NOT NULL DEFAULT 26,
+    start_date         TEXT,                      -- 'YYYY-MM-DD', optional
+    end_date           TEXT                       -- 'YYYY-MM-DD', NULL = on-going
 );
 
 CREATE TABLE IF NOT EXISTS pay_schedule_deductions (
@@ -188,6 +219,10 @@ def init_db():
         _ensure_column(conn, "transactions", "import_merchant", "TEXT")
         _ensure_column(conn, "pending_credits", "resolved", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "pending_credits", "resolution", "TEXT")
+        _ensure_column(conn, "pay_schedule", "start_date", "TEXT")
+        _ensure_column(conn, "pay_schedule", "end_date", "TEXT")
+        _ensure_column(conn, "contributions", "import_hash", "TEXT")
+        _ensure_column(conn, "valuations", "import_hash", "TEXT")
         conn.commit()
 
 
@@ -313,16 +348,18 @@ def get_pay_schedule():
         return schedule
 
 
-def save_pay_schedule(annual_income, anchor_date, payments_per_year=26):
+def save_pay_schedule(annual_income, anchor_date, payments_per_year=26, start_date=None, end_date=None):
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO pay_schedule (id, annual_income, anchor_date, payments_per_year)
-               VALUES (1, ?, ?, ?)
+            """INSERT INTO pay_schedule (id, annual_income, anchor_date, payments_per_year, start_date, end_date)
+               VALUES (1, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    annual_income = excluded.annual_income,
                    anchor_date = excluded.anchor_date,
-                   payments_per_year = excluded.payments_per_year""",
-            (annual_income, anchor_date, payments_per_year),
+                   payments_per_year = excluded.payments_per_year,
+                   start_date = excluded.start_date,
+                   end_date = excluded.end_date""",
+            (annual_income, anchor_date, payments_per_year, start_date, end_date),
         )
         conn.commit()
 
@@ -358,6 +395,17 @@ def get_pay_schedule_summary(month):
 
     interval_days = round(365.25 / schedule["payments_per_year"])
     pay_dates = _pay_dates_in_month(schedule["anchor_date"], interval_days, month)
+
+    # Restrict to the schedule's active window: start_date/end_date are
+    # optional bounds (e.g. a job that started or ended mid-year), and a
+    # blank end_date means "on-going" so no upper bound is applied.
+    start_date = schedule.get("start_date")
+    end_date = schedule.get("end_date")
+    if start_date:
+        pay_dates = [d for d in pay_dates if d >= start_date]
+    if end_date:
+        pay_dates = [d for d in pay_dates if d <= end_date]
+
     count = len(pay_dates)
 
     per_check_gross = schedule["annual_income"] / schedule["payments_per_year"]
@@ -489,6 +537,56 @@ def get_monthly_spending_report(month):
     return list(groups.values())
 
 
+def get_multi_year_trend(years):
+    """Total monthly spend (all groups combined) for each requested year, so
+    the frontend can overlay several years on one chart."""
+    result = {}
+    with get_conn() as conn:
+        for year in years:
+            rows = conn.execute(
+                """
+                SELECT strftime('%m', t.date) AS month_num, SUM(t.amount) AS total
+                FROM transactions t
+                WHERE t.type = 'expense' AND strftime('%Y', t.date) = ?
+                GROUP BY month_num
+                """,
+                (str(year),),
+            ).fetchall()
+            totals_by_month = {r["month_num"]: r["total"] for r in rows}
+            result[str(year)] = [round(totals_by_month.get(f"{m:02d}", 0.0), 2) for m in range(1, 13)]
+    return result
+
+
+def get_savings_rate_series(year):
+    """
+    Savings Rate for each month of `year` = (money that went to a budget
+    group literally named 'Savings') / (Net Take-Home that month). A month
+    with no income logged is returned with savings_rate_pct = None rather
+    than a misleading 0%, since the rate is undefined without a denominator.
+    """
+    results = []
+    for m in range(1, 13):
+        month_str = f"{year}-{m:02d}"
+        income = get_income_summary(month_str)
+        net_take_home = income["net_take_home"]
+        if net_take_home <= 0:
+            results.append({
+                "month": month_str, "net_take_home": 0.0,
+                "savings_amount": 0.0, "savings_rate_pct": None,
+            })
+            continue
+
+        groups = get_monthly_spending_report(month_str)
+        savings_amount = sum(g["spent"] for g in groups if g["group"].strip().lower() == "savings")
+        results.append({
+            "month": month_str,
+            "net_take_home": round(net_take_home, 2),
+            "savings_amount": round(savings_amount, 2),
+            "savings_rate_pct": round(savings_amount / net_take_home * 100, 2),
+        })
+    return results
+
+
 def get_annual_trend(year):
     """Monthly spend total per group across a calendar year."""
     with get_conn() as conn:
@@ -553,6 +651,256 @@ def get_budget_flow(month):
     return {"nodes": nodes, "links": links}
 
 
+def _xirr(cash_flows):
+    """
+    cash_flows: list of (datetime, amount) tuples -- negative for money
+    going into the account (a contribution), positive for the terminal
+    value being pulled back out (the account's current worth). Returns the
+    annualized rate as a float (0.084 == 8.4%/yr), or None if it can't be
+    solved (e.g. everything flows the same direction, so no real interest
+    rate would reconcile them).
+
+    Solved by bisection rather than Newton-Raphson: it needs no derivative,
+    and given a bracket with a sign change it can't diverge, which matters
+    more here than raw speed for a handful of cash flows.
+    """
+    if len(cash_flows) < 2:
+        return None
+    cash_flows = sorted(cash_flows, key=lambda cf: cf[0])
+    t0 = cash_flows[0][0]
+
+    def npv(rate):
+        total = 0.0
+        for d, amt in cash_flows:
+            days = (d - t0).days
+            total += amt / ((1 + rate) ** (days / 365.0))
+        return total
+
+    lo, hi = -0.999, 10.0  # -99.9% to +1000%/yr -- generous enough for any real account
+    f_lo, f_hi = npv(lo), npv(hi)
+    if f_lo == 0:
+        return lo
+    if f_hi == 0:
+        return hi
+    if (f_lo > 0) == (f_hi > 0):
+        return None  # no sign change in range -> no root to bracket
+
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        f_mid = npv(mid)
+        if abs(f_mid) < 1e-6:
+            return mid
+        if (f_mid > 0) == (f_lo > 0):
+            lo, f_lo = mid, f_mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _compute_account_return_metrics(account):
+    """
+    Three "how well is this account actually doing" numbers, cheapest to
+    most rigorous:
+      - simple_return_pct: (current value - total contributed) / total
+        contributed. Ignores timing entirely.
+      - cagr_pct: annualizes that same growth over the account's elapsed
+        history. Still ignores *when* money went in -- a lump sum from day
+        one and 8 equal monthly deposits get treated identically -- so it's
+        only a rough read, most useful for an account that started with one
+        deposit and mostly just sat there.
+      - xirr_pct: the cash-flow-timed version -- every contribution dated
+        individually against the current value -- so a big deposit made
+        last month isn't credited with a full year of growth the way CAGR
+        would credit it.
+    """
+    contributions = account.get("contributions") or []
+    valuations = account.get("valuations") or []
+    if not contributions and not valuations:
+        return None
+
+    total_contributed = sum(c["amount"] for c in contributions)
+    if valuations:
+        latest_date, latest_value = valuations[-1]["date"], valuations[-1]["value"]
+    elif contributions:
+        latest_date, latest_value = contributions[-1]["date"], total_contributed
+    else:
+        return None
+
+    if total_contributed <= 0:
+        return None
+
+    simple_return_pct = (latest_value - total_contributed) / total_contributed * 100
+
+    dates = sorted({c["date"] for c in contributions} | {v["date"] for v in valuations})
+    first_date = dates[0]
+    years = (datetime.strptime(latest_date, "%Y-%m-%d") - datetime.strptime(first_date, "%Y-%m-%d")).days / 365.0
+
+    cagr_pct = None
+    if years >= 0.08:  # under ~a month is too short to annualize meaningfully
+        try:
+            cagr_pct = ((latest_value / total_contributed) ** (1 / years) - 1) * 100
+        except (ZeroDivisionError, ValueError):
+            cagr_pct = None
+
+    cash_flows = [(datetime.strptime(c["date"], "%Y-%m-%d"), -c["amount"]) for c in contributions]
+    cash_flows.append((datetime.strptime(latest_date, "%Y-%m-%d"), latest_value))
+    xirr = _xirr(cash_flows)
+
+    return {
+        "total_contributed": round(total_contributed, 2),
+        "current_value": round(latest_value, 2),
+        "as_of": latest_date,
+        "simple_return_pct": round(simple_return_pct, 2),
+        "cagr_pct": round(cagr_pct, 2) if cagr_pct is not None else None,
+        "xirr_pct": round(xirr * 100, 2) if xirr is not None else None,
+    }
+
+
+def _twrr_subperiod_returns(contributions, valuations):
+    """
+    Splits an account's history into sub-periods bounded by consecutive
+    valuations, and computes the return of each sub-period with
+    contributions backed out -- the standard building block behind
+    Time-Weighted Rate of Return. Any contributions that landed inside a
+    sub-period are treated as if they arrived right before the period's
+    ending valuation; that's the standard simplification apps make when
+    they don't have a fresh valuation logged at every single cash-flow
+    date (the fully precise version, Modified Dietz / true TWRR, needs a
+    valuation *at* each cash flow, which manually-logged accounts won't
+    usually have).
+
+    Returns a list of {date, days, return} dicts, one per valuation after
+    the first -- `date` is the period's end date, `days` is the sub-period
+    length, `return` is that period's contribution-adjusted return.
+    """
+    if len(valuations) < 2:
+        return []
+    vals = sorted(valuations, key=lambda v: v["date"])
+    periods = []
+    for i in range(1, len(vals)):
+        start_date, start_val = vals[i - 1]["date"], vals[i - 1]["value"]
+        end_date, end_val = vals[i]["date"], vals[i]["value"]
+        if start_val <= 0:
+            continue
+        days = (datetime.strptime(end_date, "%Y-%m-%d") - datetime.strptime(start_date, "%Y-%m-%d")).days
+        if days <= 0:
+            continue
+        cf = sum(c["amount"] for c in contributions if start_date < c["date"] <= end_date)
+        r = (end_val - cf - start_val) / start_val
+        periods.append({"date": end_date, "days": days, "return": r})
+    return periods
+
+
+def _compute_risk_metrics(account):
+    """
+    Four risk/performance numbers built on top of the same sub-period
+    return series:
+      - twrr_pct: Time-Weighted Rate of Return, annualized. Unlike XIRR,
+        this is deliberately blind to *how much* was contributed each
+        period -- it only measures how well the money that was invested
+        performed, which is the standard way to judge investment
+        selection independent of your own deposit behavior.
+      - annualized_volatility_pct: how much those periodic returns swing
+        around their average, annualized.
+      - max_drawdown_pct / drawdown_peak_date / drawdown_trough_date: the
+        worst peak-to-trough decline in a synthetic "growth of $1" index
+        built from the same TWRR sub-period returns (so, like TWRR, it
+        isolates investment performance from new money flowing in).
+      - drawdown_duration_days: peak to trough, in days.
+      - recovery_date / recovery_days / recovered: trough back to that
+        same peak level, or None/False if it hasn't happened yet.
+    """
+    contributions = account.get("contributions") or []
+    valuations = account.get("valuations") or []
+    periods = _twrr_subperiod_returns(contributions, valuations)
+    if not periods:
+        return None
+
+    total_days = sum(p["days"] for p in periods)
+    if total_days <= 0:
+        return None
+
+    # ---- Time-Weighted Rate of Return ----
+    cumulative = 1.0
+    for p in periods:
+        cumulative *= (1 + p["return"])
+    twrr_cumulative_pct = (cumulative - 1) * 100
+    years = total_days / 365.0
+    twrr_annualized_pct = ((cumulative ** (1 / years)) - 1) * 100 if years > 0 else None
+
+    # ---- Annualized Volatility (needs at least 2 sub-periods for a stdev) ----
+    annualized_volatility_pct = None
+    if len(periods) >= 2:
+        try:
+            period_stdev = statistics.stdev(p["return"] for p in periods)
+            avg_period_years = (total_days / len(periods)) / 365.0
+            if avg_period_years > 0:
+                annualized_volatility_pct = period_stdev * math.sqrt(1 / avg_period_years) * 100
+        except statistics.StatisticsError:
+            annualized_volatility_pct = None
+
+    # ---- Growth-of-$1 index, for Max Drawdown / Duration / Recovery ----
+    vals_sorted = sorted(valuations, key=lambda v: v["date"])
+    index_points = [{"date": vals_sorted[0]["date"], "index": 1.0}]
+    running = 1.0
+    for p in periods:
+        running *= (1 + p["return"])
+        index_points.append({"date": p["date"], "index": running})
+
+    peak_value = index_points[0]["index"]
+    peak_date = index_points[0]["date"]
+    max_dd = 0.0
+    dd_peak_date = peak_date
+    dd_trough_date = peak_date
+    for pt in index_points[1:]:
+        if pt["index"] > peak_value:
+            peak_value = pt["index"]
+            peak_date = pt["date"]
+        dd = (pt["index"] / peak_value) - 1
+        if dd < max_dd:
+            max_dd = dd
+            dd_peak_date = peak_date
+            dd_trough_date = pt["date"]
+
+    drawdown_duration_days = None
+    recovery_date = None
+    recovery_days = None
+    recovered = None
+    if max_dd < 0:
+        drawdown_duration_days = (
+            datetime.strptime(dd_trough_date, "%Y-%m-%d") - datetime.strptime(dd_peak_date, "%Y-%m-%d")
+        ).days
+        peak_index_value = next(pt["index"] for pt in index_points if pt["date"] == dd_peak_date)
+        past_trough = False
+        for pt in index_points:
+            if pt["date"] == dd_trough_date:
+                past_trough = True
+                continue
+            if past_trough and pt["index"] >= peak_index_value:
+                recovery_date = pt["date"]
+                recovery_days = (
+                    datetime.strptime(recovery_date, "%Y-%m-%d") - datetime.strptime(dd_trough_date, "%Y-%m-%d")
+                ).days
+                recovered = True
+                break
+        if recovery_date is None:
+            recovered = False
+
+    return {
+        "twrr_pct": round(twrr_annualized_pct, 2) if twrr_annualized_pct is not None else None,
+        "twrr_cumulative_pct": round(twrr_cumulative_pct, 2),
+        "annualized_volatility_pct": round(annualized_volatility_pct, 2) if annualized_volatility_pct is not None else None,
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "drawdown_peak_date": dd_peak_date if max_dd < 0 else None,
+        "drawdown_trough_date": dd_trough_date if max_dd < 0 else None,
+        "drawdown_duration_days": drawdown_duration_days,
+        "recovery_date": recovery_date,
+        "recovery_days": recovery_days,
+        "recovered": recovered,
+        "num_return_periods": len(periods),
+    }
+
+
 def get_net_worth_history():
     """
     For every account, returns contribution running-total and the latest
@@ -571,6 +919,13 @@ def get_net_worth_history():
             ).fetchall()
             acc["contributions"] = rows_to_dicts(contribs)
             acc["valuations"] = rows_to_dicts(vals)
+
+            metrics = _compute_account_return_metrics(acc)
+            risk_metrics = _compute_risk_metrics(acc)
+            if risk_metrics:
+                metrics = metrics or {}
+                metrics.update(risk_metrics)
+            acc["metrics"] = metrics
         return accounts
 
 
@@ -766,6 +1121,68 @@ def _lookup_mapping(conn, category, subcategory, merchant):
         if row:
             return dict(row)
     return None
+
+
+def import_account_csv(account_id, csv_text):
+    """
+    Imports contributions/valuations for one Net Worth Aggregator account.
+    Expected columns: Date, Type, Amount -- Type is 'Contribution' or
+    'Valuation' (case-insensitive). For a Contribution row, Amount is the
+    amount deposited on that date; for a Valuation row, Amount (or a
+    'Value' column, accepted as an alias) is the account's total value as
+    of that date. Duplicate rows (matched by account + type + date +
+    amount) are skipped so re-importing an overlapping export is safe.
+    """
+    reader = csv.DictReader(io.StringIO(csv_text))
+    imported_contributions = 0
+    imported_valuations = 0
+    skipped_duplicate = 0
+    errors = []
+
+    with get_conn() as conn:
+        for row_num, row in enumerate(reader, start=2):  # header is row 1
+            try:
+                date = _parse_csv_date(row.get("Date"))
+                if not date:
+                    errors.append(f"Row {row_num}: couldn't parse a date, skipped.")
+                    continue
+
+                type_raw = (row.get("Type") or "").strip().lower()
+                if type_raw not in ("contribution", "valuation"):
+                    errors.append(f"Row {row_num}: Type must be 'Contribution' or 'Valuation', skipped.")
+                    continue
+
+                amount = _parse_csv_amount(row.get("Amount") or row.get("Value"))
+                table = "contributions" if type_raw == "contribution" else "valuations"
+                value_col = "amount" if type_raw == "contribution" else "value"
+                import_hash = _compute_import_hash(date, amount, f"{account_id}|{type_raw}")
+
+                existing = conn.execute(
+                    f"SELECT id FROM {table} WHERE import_hash = ?", (import_hash,)
+                ).fetchone()
+                if existing:
+                    skipped_duplicate += 1
+                    continue
+
+                conn.execute(
+                    f"INSERT INTO {table} (account_id, date, {value_col}, import_hash) VALUES (?, ?, ?, ?)",
+                    (account_id, date, amount, import_hash),
+                )
+                if type_raw == "contribution":
+                    imported_contributions += 1
+                else:
+                    imported_valuations += 1
+            except Exception as e:
+                errors.append(f"Row {row_num}: {e}")
+
+        conn.commit()
+
+    return {
+        "imported_contributions": imported_contributions,
+        "imported_valuations": imported_valuations,
+        "skipped_duplicate": skipped_duplicate,
+        "errors": errors,
+    }
 
 
 def import_transactions_csv(csv_text):
@@ -980,6 +1397,57 @@ def _learn_mapping_from_transactions(conn, ids, line_item_id):
         )
 
 
+def search_transactions(q=None, date_from=None, date_to=None, line_item_id=None,
+                         tx_type=None, min_amount=None, max_amount=None, limit=500):
+    """
+    Cross-month transaction search -- the Daily Ledger tab only ever shows
+    one Ledger Month at a time, so this is the escape hatch for "when did I
+    buy that" / "show me everything from Amazon this year" style questions
+    that span months.
+    """
+    clauses = []
+    params = []
+
+    if q:
+        clauses.append("(t.description LIKE ? OR t.import_merchant LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like])
+    if date_from:
+        clauses.append("t.date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("t.date <= ?")
+        params.append(date_to)
+    if line_item_id:
+        clauses.append("t.line_item_id = ?")
+        params.append(line_item_id)
+    if tx_type:
+        clauses.append("t.type = ?")
+        params.append(tx_type)
+    if min_amount is not None:
+        clauses.append("t.amount >= ?")
+        params.append(min_amount)
+    if max_amount is not None:
+        clauses.append("t.amount <= ?")
+        params.append(max_amount)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT t.*, g.name AS group_name, li.name AS line_item_name
+            FROM transactions t
+            LEFT JOIN budget_line_items li ON li.id = t.line_item_id
+            LEFT JOIN budget_groups g ON g.id = li.group_id
+            {where}
+            ORDER BY t.date DESC, t.id DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall()
+        return rows_to_dicts(rows)
+
+
 def update_transaction(tx_id, fields):
     """Edits a transaction (date/description/amount/line_item_id) and, if a
     Line Item was assigned, teaches the mapping system from it."""
@@ -1092,3 +1560,307 @@ def dismiss_pending_credit(pending_id):
             (pending_id,),
         )
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Debt Payoff Tracker — mirror image of the Net Worth Aggregator: balances
+# go down instead of up, driven by an interest formula instead of manual
+# valuations. Covers both standard amortizing loans (mortgage, auto,
+# student, personal) and revolving debt (credit cards).
+# ---------------------------------------------------------------------------
+def get_debts():
+    with get_conn() as conn:
+        debts = rows_to_dicts(conn.execute("SELECT * FROM debts ORDER BY id").fetchall())
+        for d in debts:
+            payments = conn.execute(
+                "SELECT * FROM debt_payments WHERE debt_id = ? ORDER BY date", (d["id"],)
+            ).fetchall()
+            d["payments"] = rows_to_dicts(payments)
+        return debts
+
+
+def add_debt_payment(debt_id, pay_date, amount):
+    """
+    Logs one payment and automatically splits it into interest/principal
+    based on the debt's current balance and APR (same math a real loan
+    servicer uses), then reduces current_balance by the principal portion --
+    so unlike Net Worth accounts, you don't separately "update the value";
+    logging a payment IS what moves the balance.
+    """
+    with get_conn() as conn:
+        debt = conn.execute("SELECT * FROM debts WHERE id = ?", (debt_id,)).fetchone()
+        if not debt:
+            raise ValueError("Debt not found.")
+        debt = dict(debt)
+
+        monthly_rate = (debt["apr"] / 100) / 12
+        interest_portion = round(debt["current_balance"] * monthly_rate, 2)
+        principal_portion = round(amount - interest_portion, 2)
+        if principal_portion < 0:
+            # Payment didn't even cover this period's interest -- balance
+            # actually grows; still record it honestly rather than pretending
+            # negative principal is zero.
+            new_balance = round(debt["current_balance"] - principal_portion, 2)
+        else:
+            new_balance = round(max(debt["current_balance"] - principal_portion, 0.0), 2)
+
+        conn.execute(
+            "INSERT INTO debt_payments (debt_id, date, amount, principal, interest) VALUES (?, ?, ?, ?, ?)",
+            (debt_id, pay_date, amount, principal_portion, interest_portion),
+        )
+        conn.execute("UPDATE debts SET current_balance = ? WHERE id = ?", (new_balance, debt_id))
+        conn.commit()
+        return {"interest": interest_portion, "principal": principal_portion, "new_balance": new_balance}
+
+
+def _add_months(d, months):
+    """Adds `months` calendar months to date `d`, clamping the day so e.g.
+    Jan 31 + 1 month lands on Feb 28/29 instead of overflowing into March."""
+    total = d.month - 1 + months
+    year = d.year + total // 12
+    month = total % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _amortization_schedule(balance, apr, payment, max_months=600):
+    """
+    Simulates paying down `balance` at `apr`% APR with a fixed monthly
+    `payment` (works for both a standard installment loan and a revolving
+    balance paid at a fixed amount each month). Returns a list of
+    {month, interest, principal, balance} rows, stopping when the balance
+    hits 0 or max_months (50 years) is reached as a safety valve.
+
+    If `payment` doesn't even cover the first month's interest, the
+    schedule comes back empty -- the balance would never shrink, which the
+    caller surfaces as a warning rather than looping pointlessly.
+    """
+    monthly_rate = (apr / 100) / 12
+    schedule = []
+    bal = balance
+    month = 0
+    while bal > 0.01 and month < max_months:
+        interest = bal * monthly_rate
+        if payment <= interest:
+            break
+        principal = min(payment - interest, bal)
+        bal = round(bal - principal, 2)
+        month += 1
+        schedule.append({"month": month, "interest": round(interest, 2), "principal": round(principal, 2), "balance": bal})
+    return schedule
+
+
+def get_debt_summary(debt_id):
+    """Payoff projection for one debt at its current minimum_payment:
+    months remaining, total interest still to be paid, and a projected
+    payoff date -- or a warning if the minimum payment can't even cover
+    the monthly interest."""
+    with get_conn() as conn:
+        debt = conn.execute("SELECT * FROM debts WHERE id = ?", (debt_id,)).fetchone()
+    if not debt:
+        raise ValueError("Debt not found.")
+    debt = dict(debt)
+
+    if debt["current_balance"] <= 0.01:
+        return {"months_to_payoff": 0, "total_interest": 0.0, "payoff_date": date.today().isoformat(), "warning": None, "schedule": []}
+
+    schedule = _amortization_schedule(debt["current_balance"], debt["apr"], debt["minimum_payment"])
+    if not schedule:
+        return {
+            "months_to_payoff": None, "total_interest": None, "payoff_date": None,
+            "warning": "The minimum payment doesn't cover this month's interest, so the balance won't shrink at this payment amount.",
+            "schedule": [],
+        }
+
+    total_interest = round(sum(r["interest"] for r in schedule), 2)
+    months = len(schedule)
+    payoff_date = _add_months(date.today(), months).isoformat()
+    return {"months_to_payoff": months, "total_interest": total_interest, "payoff_date": payoff_date, "warning": None, "schedule": schedule}
+
+
+def get_debt_payoff_plan(strategy="avalanche", extra_monthly=0.0, max_months=600):
+    """
+    Simulates paying off every debt in parallel: each keeps getting its own
+    minimum payment every month, and `extra_monthly` is funneled entirely
+    into ONE target debt at a time, chosen by `strategy`:
+      - "avalanche": highest APR first (minimizes total interest paid)
+      - "snowball":  smallest balance first (clears individual debts fastest)
+    The instant a debt hits $0, its minimum payment rolls into the extra
+    pool for the next target -- the "snowball" effect either strategy relies
+    on to accelerate over time.
+    """
+    debts = get_debts()
+    balances = {d["id"]: d["current_balance"] for d in debts if d["current_balance"] > 0.01}
+    aprs = {d["id"]: d["apr"] for d in debts}
+    mins = {d["id"]: d["minimum_payment"] for d in debts}
+    names = {d["id"]: d["name"] for d in debts}
+
+    if not balances:
+        return {"strategy": strategy, "months_to_debt_free": 0, "total_interest": 0.0, "payoff_order": [], "monthly_balance_totals": []}
+
+    def sort_key(debt_id):
+        return balances[debt_id] if strategy == "snowball" else -aprs[debt_id]
+
+    total_interest = 0.0
+    month = 0
+    payoff_order = []
+    monthly_totals = []
+    extra_pool = extra_monthly
+
+    while balances and month < max_months:
+        month += 1
+
+        for debt_id in list(balances.keys()):
+            interest = balances[debt_id] * (aprs[debt_id] / 100) / 12
+            total_interest += interest
+            balances[debt_id] += interest
+
+        for debt_id in list(balances.keys()):
+            pay = min(mins[debt_id], balances[debt_id])
+            balances[debt_id] -= pay
+
+        pool = extra_pool
+        for debt_id in sorted(balances.keys(), key=sort_key):
+            if pool <= 0:
+                break
+            pay = min(pool, balances[debt_id])
+            balances[debt_id] -= pay
+            pool -= pay
+
+        for debt_id in list(balances.keys()):
+            if balances[debt_id] <= 0.01:
+                payoff_order.append({"id": debt_id, "name": names[debt_id], "month": month})
+                extra_pool += mins[debt_id]
+                del balances[debt_id]
+
+        monthly_totals.append(round(sum(balances.values()), 2))
+
+    return {
+        "strategy": strategy,
+        "months_to_debt_free": month if not balances else None,
+        "total_interest": round(total_interest, 2),
+        "payoff_order": payoff_order,
+        "monthly_balance_totals": monthly_totals,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Full-database Excel backup / restore — one sheet per table, covering
+# essentially every piece of user data across all three pages (Budget,
+# Track, Report). BACKUP_TABLES order matters: parents before children for
+# insert-on-restore, since every child table's foreign key needs its
+# parent row to already exist. Kept pandas-free on purpose (api.py owns
+# turning this into/from an actual .xlsx) so this module's only dependency
+# stays sqlite3.
+# ---------------------------------------------------------------------------
+BACKUP_TABLES = [
+    ("Budget Groups", "budget_groups", ["id", "name", "sort_order"]),
+    ("Budget Line Items", "budget_line_items", ["id", "group_id", "name", "month", "planned_amount"]),
+    ("Budget Presets", "budget_presets", ["id", "name"]),
+    ("Budget Preset Items", "budget_preset_items", ["id", "preset_id", "group_name", "item_name", "planned_amount", "sort_order"]),
+    ("Income", "income", ["id", "month", "source", "gross_amount", "pay_date"]),
+    ("Income Deductions", "deductions", ["id", "income_id", "name", "amount"]),
+    ("Income Investments", "investments", ["id", "income_id", "name", "amount", "is_match"]),
+    ("Pay Schedule", "pay_schedule", ["id", "annual_income", "anchor_date", "payments_per_year", "start_date", "end_date"]),
+    ("Pay Schedule Deductions", "pay_schedule_deductions", ["id", "name", "amount"]),
+    ("Pay Schedule Investments", "pay_schedule_investments", ["id", "name", "amount", "is_match"]),
+    ("Transactions", "transactions", ["id", "line_item_id", "date", "description", "amount", "type", "import_hash", "import_category", "import_subcategory", "import_merchant"]),
+    ("Pending Credits", "pending_credits", ["id", "date", "description", "amount", "merchant", "category", "subcategory", "import_hash", "resolved", "resolution"]),
+    ("Sinking Funds", "sinking_funds", ["id", "name", "target_amount", "target_date"]),
+    ("Fund Contributions", "sinking_fund_contributions", ["id", "fund_id", "date", "amount"]),
+    ("Accounts", "accounts", ["id", "name", "account_type"]),
+    ("Account Contributions", "contributions", ["id", "account_id", "date", "amount", "import_hash"]),
+    ("Account Valuations", "valuations", ["id", "account_id", "date", "value", "import_hash"]),
+    ("Debts", "debts", ["id", "name", "debt_type", "is_revolving", "current_balance", "apr", "minimum_payment", "original_principal", "original_term_months", "start_date", "escrow_amount"]),
+    ("Debt Payments", "debt_payments", ["id", "debt_id", "date", "amount", "principal", "interest"]),
+    ("Import Mappings", "import_mappings", ["id", "match_key", "group_name", "item_name"]),
+    ("App Settings", "app_settings", ["key", "value"]),
+]
+
+# Human-readable column headers for the exported sheets — presentation
+# only; import maps these back to the raw column name via BACKUP_TABLES.
+_COLUMN_LABELS = {
+    "id": "ID", "name": "Name", "sort_order": "Sort Order", "group_id": "Group ID",
+    "planned_amount": "Planned Amount", "month": "Month", "preset_id": "Preset ID",
+    "group_name": "Group Name", "item_name": "Item Name", "source": "Source",
+    "gross_amount": "Gross Amount", "pay_date": "Pay Date", "income_id": "Income ID",
+    "amount": "Amount", "is_match": "Is Employer Match", "annual_income": "Annual Income",
+    "anchor_date": "Anchor Pay Date", "payments_per_year": "Payments Per Year",
+    "start_date": "Start Date", "end_date": "End Date", "line_item_id": "Line Item ID",
+    "date": "Date", "description": "Description", "type": "Type",
+    "import_hash": "Import Hash", "import_category": "Import Category",
+    "import_subcategory": "Import Subcategory", "import_merchant": "Import Merchant",
+    "merchant": "Merchant", "category": "Category", "subcategory": "Subcategory",
+    "resolved": "Resolved", "resolution": "Resolution", "fund_id": "Fund ID",
+    "account_id": "Account ID", "account_type": "Account Type", "value": "Value",
+    "debt_id": "Debt ID", "debt_type": "Debt Type", "is_revolving": "Is Revolving",
+    "current_balance": "Current Balance", "apr": "APR %", "minimum_payment": "Minimum Payment",
+    "original_principal": "Original Principal", "original_term_months": "Original Term (Months)",
+    "escrow_amount": "Escrow Amount", "principal": "Principal", "interest": "Interest",
+    "match_key": "Match Key", "key": "Key",
+}
+
+
+def get_full_backup_data():
+    """
+    Returns [(sheet_name, [headers], [[row values], ...]), ...] covering
+    every table in BACKUP_TABLES. api.py turns this into an actual multi-
+    sheet .xlsx via pandas.
+    """
+    sheets = []
+    with get_conn() as conn:
+        for sheet_name, table, columns in BACKUP_TABLES:
+            rows = conn.execute(f"SELECT {', '.join(columns)} FROM {table}").fetchall()
+            headers = [_COLUMN_LABELS.get(c, c.replace("_", " ").title()) for c in columns]
+            data_rows = [[r[c] for c in columns] for r in rows]
+            sheets.append((sheet_name, headers, data_rows))
+    return sheets
+
+
+def import_full_backup_data(sheets):
+    """
+    Restores the database from a full backup produced by
+    get_full_backup_data() and round-tripped through Excel. This is a
+    DESTRUCTIVE full replace: every sheet name in `sheets` that matches a
+    known table has that table's existing rows cleared and replaced with
+    exactly what's in the sheet — primary keys included, so every other
+    table's foreign keys stay pointing at the right row. Any sheet/table
+    not present in the upload is left completely untouched.
+
+    `sheets`: dict of {sheet_name: [ {raw_column_name: value, ...}, ... ]}
+    -- api.py is responsible for parsing the uploaded .xlsx into this shape
+    (mapping the human-readable headers back to raw column names).
+    """
+    known = {name: (table, columns) for name, table, columns in BACKUP_TABLES}
+    matched = [(name, known[name][0], known[name][1]) for name in sheets if name in known]
+    if not matched:
+        raise ValueError("No recognized sheets found in this file — is it a backup exported from this app?")
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        # Off for the duration of this one atomic swap only: deleting a
+        # parent before its (about-to-be-deleted-anyway) children would
+        # otherwise trip a constraint mid-flight even though the end state
+        # is fully consistent.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for _name, table, _columns in reversed(matched):
+            conn.execute(f"DELETE FROM {table}")
+        for name, table, columns in matched:
+            for row in sheets[name]:
+                values = []
+                for c in columns:
+                    v = row.get(c)
+                    if v is None or (isinstance(v, float) and v != v):  # v != v catches NaN
+                        v = None
+                    values.append(v)
+                placeholders = ", ".join(["?"] * len(columns))
+                conn.execute(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})", values)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return {"tables_restored": [name for name, _, _ in matched]}

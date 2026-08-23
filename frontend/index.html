@@ -56,6 +56,10 @@
           <option value="standard">Standard</option>
         </select>
       </div>
+      <div class="nav-footer-group">
+        <button type="button" class="btn-ghost nav-import-btn" id="import-backup-btn">Import Excel Backup</button>
+        <input type="file" id="import-backup-file-input" accept=".xlsx" style="display:none;" />
+      </div>
     </div>
   </nav>
 
@@ -80,11 +84,15 @@
       </header>
 
       <!-- ---- Pay Schedule (biweekly/N-per-year payroll) ---- -->
-      <div class="card" id="pay-schedule-card">
+      <div class="card collapsed" id="pay-schedule-card">
         <div class="card-header-row">
           <h2>Pay Schedule</h2>
-          <span class="hint" id="pay-schedule-month-info"></span>
+          <div class="card-header-actions">
+            <span class="hint" id="pay-schedule-month-info"></span>
+            <button type="button" class="card-toggle-btn" data-card-toggle aria-expanded="false" aria-controls="pay-schedule-content">+</button>
+          </div>
         </div>
+        <div class="card-content" id="pay-schedule-content">
         <p class="hint">Enter your annual income once. Deductions and investments below are <strong>per-paycheck</strong> amounts — they're multiplied automatically by however many paychecks land in the selected month (most months get 2, but a couple get 3, since 26 biweekly paychecks don't divide evenly into 12 months).</p>
 
         <div class="pay-schedule-strip">
@@ -109,6 +117,16 @@
               <input type="number" step="0.01" name="amount" placeholder="Amount per check" required />
               <button type="submit">Add</button>
             </form>
+
+            <h2 class="pay-schedule-subheading">Active Income Dates</h2>
+            <form id="ps-dates-form" class="pay-details-form">
+              <label for="ps-start-date">Start date</label>
+              <input type="date" id="ps-start-date" />
+              <label for="ps-end-date">End date</label>
+              <input type="date" id="ps-end-date" />
+              <label class="checkbox-label"><input type="checkbox" id="ps-ongoing" /> On-going (no end date)</label>
+              <button type="submit" class="btn">Save Dates</button>
+            </form>
           </div>
 
           <div class="pay-schedule-col">
@@ -122,6 +140,7 @@
             </form>
           </div>
         </div>
+        </div>
       </div>
 
       <!-- ---- Income / Net Take-Home strip ---- -->
@@ -129,6 +148,11 @@
         <div class="income-col">
           <h2>Income</h2>
           <div id="income-list" class="mini-list"></div>
+          <form id="income-form" class="inline-form">
+            <input type="text" name="source" placeholder="One-time income (e.g. bonus)" required />
+            <input type="number" step="0.01" name="gross_amount" placeholder="Amount" required />
+            <button type="submit">Add</button>
+          </form>
         </div>
         <div class="income-col">
           <h2>Deductions</h2>
@@ -178,30 +202,69 @@
         <button class="subnav-tab active" data-subpage="ledger">Daily Ledger</button>
         <button class="subnav-tab" data-subpage="sinking">Sinking Funds &amp; Goals</button>
         <button class="subnav-tab" data-subpage="networth">Net Worth Aggregator</button>
+        <button class="subnav-tab" data-subpage="debts">Debt Payoff</button>
       </div>
 
       <!-- ---- Tab A: Daily Ledger ---- -->
       <div id="subpage-ledger" class="subpage active">
-        <div class="card">
-          <h2>Log a transaction</h2>
-          <form id="transaction-form" class="inline-form">
-            <input type="date" name="date" required />
-            <select name="line_item_id" id="line-item-select" required></select>
-            <input type="text" name="description" placeholder="Description" />
-            <input type="number" step="0.01" name="amount" placeholder="Amount" required />
-            <button type="submit">Log expense</button>
-          </form>
-        </div>
+        <div class="card collapsed" id="tx-actions-card">
+          <div class="card-header-row">
+            <h2>Transactions</h2>
+            <button type="button" class="card-toggle-btn" data-card-toggle aria-expanded="false" aria-controls="tx-actions-content">+</button>
+          </div>
+          <div class="card-content" id="tx-actions-content">
 
-        <div class="card">
-          <h2>Import Transactions</h2>
-          <p class="hint">Upload a Truist "individual line items" CSV export. Each row is logged automatically with a best-guess Line Item — re-uploading the same date range won't create duplicates, and rows it can't confidently categorize are left unassigned for you to review below.</p>
-          <form id="import-form" class="inline-form">
-            <input type="file" id="import-file-input" accept=".csv" required />
-            <button type="submit">Import CSV</button>
-          </form>
-          <div id="import-status" class="hint"></div>
-          <div id="import-month-nav" class="import-month-nav" style="display:none;"></div>
+          <div class="tab-toggle-bar" id="tx-actions-toggle">
+            <button type="button" class="tab-toggle-btn active" data-tx-action="log">Log</button>
+            <button type="button" class="tab-toggle-btn" data-tx-action="import">Import</button>
+            <button type="button" class="tab-toggle-btn" data-tx-action="search">Search</button>
+          </div>
+
+          <div class="tx-action-panel active" id="tx-action-log">
+            <form id="transaction-form" class="inline-form">
+              <input type="date" name="date" required />
+              <select name="type" id="tx-log-type">
+                <option value="expense">Expense</option>
+                <option value="credit">Credit (add to fund)</option>
+              </select>
+              <select name="line_item_id" id="line-item-select" required></select>
+              <select name="fund_id" id="tx-fund-select" style="display:none;"></select>
+              <input type="text" name="description" placeholder="Description" />
+              <input type="number" step="0.01" name="amount" placeholder="Amount" required />
+              <button type="submit">Log transaction</button>
+            </form>
+          </div>
+
+          <div class="tx-action-panel" id="tx-action-import">
+            <p class="hint">Upload a Truist "individual line items" CSV export. Each row is logged automatically with a best-guess Line Item — re-uploading the same date range won't create duplicates, and rows it can't confidently categorize are left unassigned for you to review below.</p>
+            <form id="import-form" class="inline-form">
+              <input type="file" id="import-file-input" accept=".csv" required />
+              <button type="submit">Import CSV</button>
+            </form>
+            <div id="import-status" class="hint"></div>
+            <div id="import-month-nav" class="import-month-nav" style="display:none;"></div>
+          </div>
+
+          <div class="tx-action-panel" id="tx-action-search">
+            <p class="hint">Searches every transaction across all months — not just the currently selected Ledger Month.</p>
+            <form id="tx-search-form" class="inline-form">
+              <input type="text" name="q" placeholder="Description or merchant contains..." />
+              <input type="date" name="date_from" title="From date" />
+              <input type="date" name="date_to" title="To date" />
+              <select name="line_item_id" id="tx-search-line-item"><option value="">Any line item</option></select>
+              <select name="type"><option value="">Any type</option><option value="expense">Expense</option><option value="income">Income</option></select>
+              <input type="number" step="0.01" name="min_amount" placeholder="Min $" />
+              <input type="number" step="0.01" name="max_amount" placeholder="Max $" />
+              <button type="submit">Search</button>
+            </form>
+            <table class="ledger-table" id="tx-search-results-table" style="display:none;">
+              <thead><tr><th>Date</th><th>Line item</th><th>Description</th><th>Type</th><th>Amount</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <p id="tx-search-status" class="hint"></p>
+          </div>
+
+          </div>
         </div>
 
         <div class="card" id="pending-credits-card" style="display:none;">
@@ -214,14 +277,18 @@
           <h2>Planned vs. Spent vs. Remaining</h2>
           <table class="ledger-table" id="ledger-summary-table">
             <thead>
-              <tr><th>Group</th><th>Line item</th><th>Planned</th><th>Spent</th><th>Remaining</th></tr>
+              <tr><th>Group</th><th>Line item</th><th class="progress-col">Progress</th><th>Planned</th><th>Spent</th><th>Remaining</th></tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
 
-        <div class="card">
-          <h2>Recent transactions</h2>
+        <div class="card" id="recent-transactions-card">
+          <div class="card-header-row">
+            <h2>Recent Transactions</h2>
+            <button type="button" class="card-toggle-btn" data-card-toggle aria-expanded="true" aria-controls="recent-transactions-content">&minus;</button>
+          </div>
+          <div class="card-content" id="recent-transactions-content">
           <div class="bulk-toolbar" id="tx-bulk-toolbar" style="display:none;">
             <span id="tx-selected-count" class="hint"></span>
             <select id="tx-bulk-line-item-select"></select>
@@ -237,32 +304,53 @@
             </thead>
             <tbody></tbody>
           </table>
+          </div>
         </div>
       </div>
 
       <!-- ---- Tab B: Sinking Funds & Goals ---- -->
       <div id="subpage-sinking" class="subpage">
-        <div class="card">
-          <h2>New sinking fund or goal</h2>
+        <div class="card collapsed" id="new-fund-card">
+          <div class="card-header-row">
+            <h2>New sinking fund or goal</h2>
+            <button type="button" class="card-toggle-btn" data-card-toggle aria-expanded="false" aria-controls="new-fund-content">+</button>
+          </div>
+          <div class="card-content" id="new-fund-content">
           <form id="fund-form" class="inline-form">
             <input type="text" name="name" placeholder="e.g. HVAC filters, House down payment" required />
             <input type="number" step="0.01" name="target_amount" placeholder="Target amount" required />
             <input type="date" name="target_date" />
             <button type="submit">Create</button>
           </form>
+          </div>
         </div>
+
+        <div class="card" id="funds-overview-card">
+          <div class="card-header-row">
+            <h2>Funds Overview</h2>
+            <button type="button" class="btn-ghost" id="funds-overview-reset-btn" style="display:none;">Show all funds</button>
+          </div>
+          <p class="hint">Progress toward every fund and goal, side by side. Click a fund's name on the left to hide it from this chart — handy when one large goal (like a house) dwarfs the smaller ones.</p>
+          <canvas id="funds-overview-chart" height="160"></canvas>
+        </div>
+
         <div id="funds-wrap"></div>
       </div>
 
       <!-- ---- Tab C: Net Worth Aggregator ---- -->
       <div id="subpage-networth" class="subpage">
-        <div class="card">
-          <h2>New account</h2>
+        <div class="card collapsed" id="new-account-card">
+          <div class="card-header-row">
+            <h2>New account</h2>
+            <button type="button" class="card-toggle-btn" data-card-toggle aria-expanded="false" aria-controls="new-account-content">+</button>
+          </div>
+          <div class="card-content" id="new-account-content">
           <form id="account-form" class="inline-form">
             <input type="text" name="name" placeholder="e.g. Truist MMA, Vanguard Brokerage" required />
             <input type="text" name="account_type" placeholder="Type (Cash, Brokerage, Retirement...)" required />
             <button type="submit">Add account</button>
           </form>
+          </div>
         </div>
         <div class="card" id="networth-chart-card" style="display:none;">
           <div class="chart-header-row">
@@ -279,6 +367,58 @@
         </div>
         <div id="accounts-wrap"></div>
       </div>
+
+      <!-- ---- Tab D: Debt Payoff Tracker ---- -->
+      <div id="subpage-debts" class="subpage">
+        <div class="card collapsed" id="new-debt-card">
+          <div class="card-header-row">
+            <h2>New debt</h2>
+            <button type="button" class="card-toggle-btn" data-card-toggle aria-expanded="false" aria-controls="new-debt-content">+</button>
+          </div>
+          <div class="card-content" id="new-debt-content">
+          <form id="debt-form" class="inline-form">
+            <input type="text" name="name" placeholder="e.g. Chase Sapphire, Honda Civic Loan" required />
+            <select name="debt_type">
+              <option>Mortgage</option>
+              <option>Auto Loan</option>
+              <option>Student Loan</option>
+              <option selected>Credit Card</option>
+              <option>Personal Loan</option>
+              <option>Other</option>
+            </select>
+            <input type="number" step="0.01" name="current_balance" placeholder="Current balance" required />
+            <input type="number" step="0.01" name="apr" placeholder="APR %" required />
+            <input type="number" step="0.01" name="minimum_payment" placeholder="Minimum payment" required />
+            <label class="checkbox-label"><input type="checkbox" name="is_revolving" /> Revolving (credit card — no fixed term)</label>
+            <input type="number" step="0.01" name="escrow_amount" placeholder="Escrow — taxes/insurance (optional)" />
+            <button type="submit">Add debt</button>
+          </form>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header-row">
+            <h2>Payoff Plan</h2>
+            <button class="btn-ghost" id="payoff-plan-export-btn" style="display:none;">Export to Excel</button>
+          </div>
+          <p class="hint">Simulates paying every debt's minimum each month, with any extra funneled entirely into one target debt at a time until it's gone, then rolling forward.</p>
+          <form id="payoff-plan-form" class="inline-form">
+            <select id="payoff-strategy">
+              <option value="avalanche">Avalanche — highest APR first (minimizes total interest)</option>
+              <option value="snowball">Snowball — smallest balance first (fastest early wins)</option>
+            </select>
+            <input type="number" step="0.01" id="payoff-extra-monthly" placeholder="Extra $/month toward debt" value="0" />
+            <button type="submit">Calculate</button>
+          </form>
+          <div id="payoff-plan-summary" class="hint"></div>
+          <table class="ledger-table" id="payoff-plan-table" style="display:none;">
+            <thead><tr><th>Debt</th><th>Monthly Payment</th><th>Amount Paid Off</th><th>Remaining Balance</th><th>Paid off in</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div id="debts-wrap"></div>
+      </div>
     </section>
 
     <!-- ================= REPORT PAGE ================= -->
@@ -288,7 +428,10 @@
           <h1>Report</h1>
           <p class="page-sub">History and trends, at a glance.</p>
         </div>
-        <button id="generate-annual-report-btn" class="btn">Generate Annual Report</button>
+        <div class="page-header-actions">
+          <button id="export-full-backup-btn" class="btn">Export to Excel</button>
+          <button id="generate-annual-report-btn" class="btn">Generate Annual Report</button>
+        </div>
       </header>
 
       <div class="report-grid-1-2">
@@ -324,6 +467,19 @@
       <div class="card">
         <h2>Net Worth: Contributions vs. Market Value <input type="number" id="networth-history-year" class="year-input" /></h2>
         <canvas id="net-worth-chart" height="195"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Multi-Year Comparison</h2>
+        <p class="hint">Total monthly spending overlaid across multiple years — pick which years to compare.</p>
+        <div id="multi-year-checklist" class="multi-year-checklist"></div>
+        <canvas id="multi-year-chart" height="180"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Savings Rate Over Time <input type="number" id="savings-rate-year" class="year-input" /></h2>
+        <p class="hint">% of Net Take-Home each month that went to the "Savings" budget group.</p>
+        <canvas id="savings-rate-chart" height="180"></canvas>
       </div>
     </section>
 

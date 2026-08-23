@@ -12,19 +12,29 @@ const Report = {
   donutChart: null,
   trendChart: null,
   netWorthChart: null,
+  multiYearChart: null,
+  savingsRateChart: null,
+  lastAdherenceRows: null,
+  lastMultiYearData: null,
+  lastSavingsRateData: null,
   palette: ["#C7A15C", "#74A788", "#7A93B0", "#C3654D", "#B9A5D6", "#7FC1C6", "#D8B679", "#9FB3C8"],
   mutedColor: "#3A4552",
 
   async refresh() {
     document.getElementById("trend-year").value =
       document.getElementById("trend-year").value || new Date().getFullYear();
+    document.getElementById("savings-rate-year").value =
+      document.getElementById("savings-rate-year").value || new Date().getFullYear();
 
     await this.renderMonthlySpending();
     await this.renderAdherence();
     await this.renderBudgetFlow();
     await this.renderAnnualTrend();
     await this.renderNetWorthHistory();
+    await this.renderMultiYearComparison();
+    await this.renderSavingsRate();
     this.bindYearInput();
+    this.bindExportButtons();
   },
 
   /* ---------------------- Monthly spending: two-ring donut ---------------------- */
@@ -106,7 +116,7 @@ const Report = {
     const overallPct = plannedSum > 0 ? (spentSum / plannedSum) * 100 : 0;
 
     const overallWrap = document.getElementById("adherence-overall");
-    const barColor = overallPct > 100 ? "var(--negative)" : overallPct >= 90 ? "var(--brass)" : "var(--positive)";
+    const barColor = overallPct > 100 ? "var(--negative)" : overallPct >= 90 ? "var(--accent)" : "var(--positive)";
     overallWrap.innerHTML = `
       <div class="adherence-top-row">
         <span class="big-pct">${overallPct.toFixed(0)}%</span>
@@ -117,20 +127,26 @@ const Report = {
     animateBarFills(overallWrap.querySelectorAll(".adherence-bar-fill"));
 
     const tbody = document.querySelector("#adherence-table tbody");
-    tbody.innerHTML = data.map((g) => {
+    const rows = data.map((g) => {
       const pct = g.planned > 0 ? (g.spent / g.planned) * 100 : (g.spent > 0 ? 100 : 0);
       const pctOfTakeHome = netTakeHome > 0 ? (g.spent / netTakeHome) * 100 : 0;
-      let statusClass = "under", statusLabel = "On track";
-      if (pct > 100) { statusClass = "over"; statusLabel = "Over"; }
-      else if (pct >= 90) { statusClass = "near"; statusLabel = "Near limit"; }
+      let statusLabel = "On track";
+      if (pct > 100) statusLabel = "Over";
+      else if (pct >= 90) statusLabel = "Near limit";
+      return { group: g.group, planned: g.planned, spent: g.spent, pct, pctOfTakeHome, statusLabel };
+    });
+    this.lastAdherenceRows = rows;
+
+    tbody.innerHTML = rows.map((r) => {
+      const statusClass = r.statusLabel === "Over" ? "over" : r.statusLabel === "Near limit" ? "near" : "under";
       return `
         <tr>
-          <td>${g.group}</td>
-          <td class="num">${formatCurrency(g.planned)}</td>
-          <td class="num">${formatCurrency(g.spent)}</td>
-          <td class="num">${pct.toFixed(0)}%</td>
-          <td class="num">${pctOfTakeHome.toFixed(1)}%</td>
-          <td><span class="status-pill ${statusClass}">${statusLabel}</span></td>
+          <td>${r.group}</td>
+          <td class="num">${formatCurrency(r.planned)}</td>
+          <td class="num">${formatCurrency(r.spent)}</td>
+          <td class="num">${r.pct.toFixed(0)}%</td>
+          <td class="num">${r.pctOfTakeHome.toFixed(1)}%</td>
+          <td><span class="status-pill ${statusClass}">${r.statusLabel}</span></td>
         </tr>
       `;
     }).join("") || `<tr><td colspan="6" class="hint">No budget groups for this month yet.</td></tr>`;
@@ -290,9 +306,166 @@ const Report = {
       netWorthInput.value = netWorthInput.value || new Date().getFullYear();
       netWorthInput.addEventListener("change", () => this.renderNetWorthHistory());
     }
+
+    const savingsRateInput = document.getElementById("savings-rate-year");
+    if (!savingsRateInput.dataset.bound) {
+      savingsRateInput.dataset.bound = "true";
+      savingsRateInput.addEventListener("change", () => this.renderSavingsRate());
+    }
+  },
+
+  /* ---------------------- Multi-Year Comparison ---------------------- */
+  async renderMultiYearComparison() {
+    const anchorYear = parseInt(document.getElementById("trend-year").value, 10) || new Date().getFullYear();
+    const checklistWrap = document.getElementById("multi-year-checklist");
+
+    if (!checklistWrap.dataset.built) {
+      const years = [];
+      for (let y = anchorYear - 4; y <= anchorYear; y++) years.push(y);
+      checklistWrap.innerHTML = years.map((y) =>
+        `<label class="checkbox-label"><input type="checkbox" class="multi-year-checkbox" value="${y}" ${y >= anchorYear - 1 ? "checked" : ""}/> ${y}</label>`
+      ).join("");
+      checklistWrap.dataset.built = "true";
+      checklistWrap.querySelectorAll(".multi-year-checkbox").forEach((cb) => {
+        cb.addEventListener("change", () => this.renderMultiYearChart());
+      });
+    }
+
+    await this.renderMultiYearChart();
+  },
+
+  async renderMultiYearChart() {
+    const checklistWrap = document.getElementById("multi-year-checklist");
+    const selectedYears = [...checklistWrap.querySelectorAll(".multi-year-checkbox:checked")].map((cb) => cb.value);
+    const ctx = document.getElementById("multi-year-chart");
+
+    if (!selectedYears.length) {
+      if (this.multiYearChart) { this.multiYearChart.destroy(); this.multiYearChart = null; }
+      this.lastMultiYearData = null;
+      return;
+    }
+
+    const data = await apiGet(`/api/report/multi_year_trend?years=${selectedYears.join(",")}`);
+    this.lastMultiYearData = data;
+
+    const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const datasets = selectedYears.map((y, i) => ({
+      label: y,
+      data: data[y],
+      borderColor: this.palette[i % this.palette.length],
+      backgroundColor: "transparent",
+      tension: 0.25,
+      pointRadius: 0,
+      borderWidth: 2,
+    }));
+
+    if (this.multiYearChart) this.multiYearChart.destroy();
+    this.multiYearChart = new Chart(ctx, {
+      type: "line",
+      data: { labels: monthLabels, datasets },
+      options: {
+        scales: {
+          x: { ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
+          y: { ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
+        },
+        plugins: { legend: { labels: { color: "#E9E4D8", font: { family: "Inter" } } } },
+      },
+    });
+  },
+
+  /* ---------------------- Savings Rate Over Time ---------------------- */
+  async renderSavingsRate() {
+    const yearInput = document.getElementById("savings-rate-year");
+    const year = yearInput.value || new Date().getFullYear();
+    yearInput.value = year;
+
+    const data = await apiGet(`/api/report/savings_rate?year=${year}`);
+    this.lastSavingsRateData = data;
+
+    const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const rateSeries = data.map((row) => row.savings_rate_pct);
+
+    // Loose, commonly-cited FI/budgeting benchmark tiers, just for a quick
+    // visual read: red under 10%, gold 10-20%, green 20%+. Not a judgment
+    // on any specific target -- just makes the chart scannable at a glance.
+    const barColors = rateSeries.map((v) => {
+      if (v === null) return this.mutedColor;
+      if (v >= 20) return "#74A788";
+      if (v >= 10) return "#C7A15C";
+      return "#C3654D";
+    });
+
+    const ctx = document.getElementById("savings-rate-chart");
+    if (this.savingsRateChart) this.savingsRateChart.destroy();
+    this.savingsRateChart = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels: monthLabels,
+        datasets: [{ label: "Savings Rate", data: rateSeries, backgroundColor: barColors }],
+      },
+      options: {
+        scales: {
+          x: { ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
+          y: { ticks: { color: "#93A0AF", callback: (v) => `${v}%` }, grid: { color: "#28323F" } },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: (item) => item.raw === null ? "No income logged" : `${item.raw}% saved` } },
+        },
+      },
+    });
+  },
+
+  /* ---------------------- Export to Excel (full database) ---------------------- */
+  bindExportButtons() {
+    const btn = document.getElementById("export-full-backup-btn");
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = "true";
+    btn.addEventListener("click", async () => {
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Exporting...";
+      try {
+        const res = await fetch("/api/backup/export");
+        if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+        const blob = await res.blob();
+        const stamp = new Date().toISOString().slice(0, 10);
+        await saveBlobAsFile(blob, `ledger_full_backup_${stamp}.xlsx`);
+      } catch (err) {
+        alert(`Export failed: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
   },
 
   /* ---------------------- Net worth history (single year, contributed vs value) ---------------------- */
+
+  /**
+   * Builds a small tiling canvas pattern of diagonal stripes, used as the
+   * Contributed dataset's fill so it reads as "principal" rather than one
+   * more colored account band — same visual language as the gray hatched
+   * overlay on the Annual Report PDF's version of this chart.
+   */
+  diagonalStripePattern(strokeColor) {
+    const size = 8;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const c = canvas.getContext("2d");
+    c.strokeStyle = strokeColor;
+    c.lineWidth = 1.5;
+    // Three parallel segments so the tile edges line up seamlessly when repeated.
+    [[-2, 2, 2, -2], [0, size, size, 0], [size - 2, size + 2, size + 2, size - 2]].forEach(([x0, y0, x1, y1]) => {
+      c.beginPath();
+      c.moveTo(x0, y0);
+      c.lineTo(x1, y1);
+      c.stroke();
+    });
+    return c.createPattern(canvas, "repeat");
+  },
+
   async renderNetWorthHistory() {
     const yearInput = document.getElementById("networth-history-year");
     const year = yearInput.value || new Date().getFullYear();
@@ -327,24 +500,55 @@ const Report = {
       return total;
     });
 
-    const valueSeries = dates.map((d) =>
-      accounts.reduce((total, acc) => total + accountValueAt(acc, d), 0)
-    );
+    // Each account is its own stacked band (same palette as the Value Over
+    // Time by Account chart / the PDF report) so the composition of the
+    // total Market Value at any date is visible at a glance — e.g. a date
+    // where Fund 1 is 25%, Fund 2 40%, Fund 3 5%, Fund 4 30% shows as four
+    // correspondingly-sized colored bands there.
+    const accountDatasets = accounts.map((acc, i) => ({
+      label: acc.name,
+      data: dates.map((d) => accountValueAt(acc, d)),
+      borderColor: this.palette[i % this.palette.length],
+      backgroundColor: this.palette[i % this.palette.length] + "B3", // ~70% opacity
+      borderWidth: 1.5,
+      pointRadius: 0,
+      fill: true,
+      stack: "accounts",
+      order: 2,
+      tension: 0.2,
+    }));
+
+    // Contributed is drawn on top of the stack (not part of it — its own
+    // stack group keeps it from being summed into the account bands) with
+    // a diagonal-stripe fill instead of a flat color. Chart.js draws
+    // datasets with a LOWER 'order' value last, so giving this a lower
+    // order than the account datasets above is what puts it visually on
+    // top of them rather than underneath.
+    const contributedDataset = {
+      label: "Contributed",
+      data: contributedSeries,
+      borderColor: "#93A0AF",
+      borderDash: [4, 4],
+      borderWidth: 1.5,
+      pointRadius: 0,
+      backgroundColor: this.diagonalStripePattern("#93A0AF"),
+      fill: "origin",
+      stack: "contributed",
+      order: 1,
+      tension: 0.2,
+    };
 
     if (this.netWorthChart) this.netWorthChart.destroy();
     this.netWorthChart = new Chart(ctx, {
       type: "line",
       data: {
         labels: dates,
-        datasets: [
-          { label: "Contributed", data: contributedSeries, borderColor: "#93A0AF", borderDash: [4, 4], backgroundColor: "transparent" },
-          { label: "Market Value", data: valueSeries, borderColor: "#C7A15C", backgroundColor: "rgba(199,161,92,0.12)", fill: true, tension: 0.2 },
-        ],
+        datasets: [...accountDatasets, contributedDataset],
       },
       options: {
         scales: {
           x: { ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
-          y: { ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
+          y: { stacked: true, ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
         },
         plugins: { legend: { labels: { color: "#E9E4D8", font: { family: "Inter" } } } },
       },

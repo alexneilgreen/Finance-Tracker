@@ -8,6 +8,13 @@ const Track = {
   accountsChartYear: null,
   lastAccounts: [],
   selectedTxIds: new Set(),
+  expandedAccountHistoryIds: new Set(),
+  expandedDebtHistoryIds: new Set(),
+  expandedFundHistoryIds: new Set(),
+  fundsOverviewChart: null,
+  excludedFundIds: new Set(),
+  lastPayoffPlan: null,
+  lastDebts: [],
 
   async refresh() {
     if (document.getElementById("page-track").classList.contains("active") === false) return;
@@ -21,12 +28,32 @@ const Track = {
     this.lineItemsForMonth = await apiGet(`/api/budget/line_items?month=${App.currentMonth}`);
     this.selectedTxIds.clear();
     this.populateLineItemSelect();
+    await this.populateFundSelect();
     await this.renderLedgerSummary();
     await this.renderTransactions();
     await this.renderPendingCredits();
     this.bindLedgerForm();
     this.bindImportForm();
     this.bindBulkToolbar();
+    this.bindTxSearchForm();
+    this.bindTxActionToggle();
+  },
+
+  /** Log / Import / Search toggle bar for the combined Transactions card —
+   * purely a visual/navigation switch between the three panels; each
+   * panel's form and its event bindings are completely unchanged. */
+  bindTxActionToggle() {
+    const bar = document.getElementById("tx-actions-toggle");
+    if (bar.dataset.bound) return;
+    bar.dataset.bound = "true";
+    bar.querySelectorAll(".tab-toggle-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        bar.querySelectorAll(".tab-toggle-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        document.querySelectorAll(".tx-action-panel").forEach((p) => p.classList.remove("active"));
+        document.getElementById(`tx-action-${btn.dataset.txAction}`).classList.add("active");
+      });
+    });
   },
 
   /* ---- Pending Credits (Credit-type import rows awaiting fund routing) ---- */
@@ -127,18 +154,87 @@ const Track = {
       .join("");
   },
 
+  async populateFundSelect() {
+    const funds = await apiGet("/api/sinking_funds");
+    this.fundsForLedger = funds;
+    const select = document.getElementById("tx-fund-select");
+    select.innerHTML = funds.length
+      ? funds.map((f) => `<option value="${f.id}">${f.name}</option>`).join("")
+      : `<option value="">No sinking funds yet</option>`;
+  },
+
   async renderLedgerSummary() {
     const summary = await apiGet(`/api/ledger_summary?month=${App.currentMonth}`);
     const tbody = document.querySelector("#ledger-summary-table tbody");
-    tbody.innerHTML = summary.map((li) => `
+    tbody.innerHTML = summary.map((li) => {
+      const hasPlan = li.planned_amount > 0;
+      const pct = hasPlan ? (li.spent / li.planned_amount) * 100 : 0;
+      const barColor = pct > 100 ? "var(--negative)" : pct >= 90 ? "var(--accent)" : "var(--positive)";
+      const progressCell = hasPlan
+        ? `<div class="progress-bar-track compact"><div class="progress-bar-fill" style="width:0%; background:${barColor}" data-target-pct="${Math.min(100, pct)}"></div></div>`
+        : `<span class="hint">&mdash;</span>`;
+      return `
+        <tr>
+          <td>${li.group_name}</td>
+          <td>${li.name}</td>
+          <td class="progress-col">${progressCell}</td>
+          <td class="num">${formatCurrency(li.planned_amount)}</td>
+          <td class="num">${formatCurrency(li.spent)}</td>
+          <td class="num ${li.remaining < 0 ? "negative" : "positive"}">${formatCurrency(li.remaining)}</td>
+        </tr>
+      `;
+    }).join("") || `<tr><td colspan="6" class="hint">No line items for this month yet — set up your budget first.</td></tr>`;
+
+    animateBarFills(tbody.querySelectorAll(".progress-bar-fill"));
+  },
+
+  /** Cross-month transaction search — the rest of the Daily Ledger tab is
+   * scoped to whichever Ledger Month is currently selected; this hits
+   * every transaction regardless of month. */
+  bindTxSearchForm() {
+    const select = document.getElementById("tx-search-line-item");
+    select.innerHTML = `<option value="">Any line item</option>` +
+      this.lineItemsForMonth.map((li) => `<option value="${li.id}">${li.group_name} &rsaquo; ${li.name}</option>`).join("");
+
+    const form = document.getElementById("tx-search-form");
+    if (form.dataset.bound) return;
+    form.dataset.bound = "true";
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const params = new URLSearchParams();
+      ["q", "date_from", "date_to", "line_item_id", "type", "min_amount", "max_amount"].forEach((key) => {
+        const val = fd.get(key);
+        if (val) params.set(key, val);
+      });
+      const results = await apiGet(`/api/transactions/search?${params.toString()}`);
+      this.renderTxSearchResults(results);
+    });
+  },
+
+  renderTxSearchResults(results) {
+    const table = document.getElementById("tx-search-results-table");
+    const tbody = table.querySelector("tbody");
+    const status = document.getElementById("tx-search-status");
+
+    if (!results.length) {
+      table.style.display = "none";
+      status.textContent = "No matching transactions found.";
+      return;
+    }
+
+    table.style.display = "";
+    status.textContent = `${results.length} matching transaction${results.length === 1 ? "" : "s"}.`;
+    tbody.innerHTML = results.map((tx) => `
       <tr>
-        <td>${li.group_name}</td>
-        <td>${li.name}</td>
-        <td class="num">${formatCurrency(li.planned_amount)}</td>
-        <td class="num">${formatCurrency(li.spent)}</td>
-        <td class="num ${li.remaining < 0 ? "negative" : "positive"}">${formatCurrency(li.remaining)}</td>
+        <td>${tx.date}</td>
+        <td>${tx.line_item_name ? `${tx.group_name} &rsaquo; ${tx.line_item_name}` : "&mdash; Unassigned &mdash;"}</td>
+        <td>${tx.description || ""}</td>
+        <td>${tx.type}</td>
+        <td class="num">${formatCurrency(tx.amount)}</td>
       </tr>
-    `).join("") || `<tr><td colspan="5" class="hint">No line items for this month yet — set up your budget first.</td></tr>`;
+    `).join("");
   },
 
   lineItemOptions(selectedId) {
@@ -399,20 +495,50 @@ const Track = {
     form.dataset.bound = "true";
     form.querySelector('input[name="date"]').value = todayISO();
 
+    const typeSelect = document.getElementById("tx-log-type");
+    const lineItemSelect = document.getElementById("line-item-select");
+    const fundSelect = document.getElementById("tx-fund-select");
+
+    // A logged Credit routes straight to a Sinking Fund contribution (same
+    // destination as a pending-credit's "assign to fund" action) rather than
+    // becoming a transaction row, so the Line Item picker isn't relevant —
+    // swap it out for the Fund picker instead.
+    typeSelect.addEventListener("change", () => {
+      const isCredit = typeSelect.value === "credit";
+      lineItemSelect.style.display = isCredit ? "none" : "";
+      lineItemSelect.required = !isCredit;
+      fundSelect.style.display = isCredit ? "" : "none";
+    });
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const fd = new FormData(form);
-      await apiPost("/api/transactions", {
-        date: fd.get("date"),
-        line_item_id: parseInt(fd.get("line_item_id"), 10),
-        description: fd.get("description"),
-        amount: parseFloat(fd.get("amount")) || 0,
-        type: "expense",
-      });
+      const type = fd.get("type");
+
+      if (type === "credit") {
+        const fundId = fd.get("fund_id");
+        if (!fundId) { alert("Choose a Sinking Fund to credit first."); return; }
+        await apiPost(`/api/sinking_funds/${fundId}/contributions`, {
+          date: fd.get("date"),
+          amount: parseFloat(fd.get("amount")) || 0,
+        });
+        await this.refreshFunds();
+      } else {
+        await apiPost("/api/transactions", {
+          date: fd.get("date"),
+          line_item_id: parseInt(fd.get("line_item_id"), 10),
+          description: fd.get("description"),
+          amount: parseFloat(fd.get("amount")) || 0,
+          type: "expense",
+        });
+        await this.renderLedgerSummary();
+        await this.renderTransactions();
+      }
+
       form.reset();
       form.querySelector('input[name="date"]').value = todayISO();
-      await this.renderLedgerSummary();
-      await this.renderTransactions();
+      typeSelect.value = "expense";
+      typeSelect.dispatchEvent(new Event("change"));
     });
   },
 
@@ -492,43 +618,146 @@ const Track = {
   /* =======================================================================
      TAB B — Sinking Funds & Goals
      ======================================================================= */
+  /** One stacked horizontal bar per fund/goal — Saved vs. Remaining (vs.
+   * Over target, for a fund that's exceeded its goal) — so progress across
+   * every fund is visible at a glance without opening each card. */
+  /** One stacked horizontal bar per fund/goal — Saved vs. Remaining (vs.
+   * Over target, for a fund that's exceeded its goal) — so progress across
+   * every fund is visible at a glance without opening each card. Clicking
+   * a fund's name in the Y-axis label gutter hides it from the chart
+   * (kept in excludedFundIds so it stays hidden across refreshes, e.g.
+   * after logging a new contribution) — useful when one outsized goal
+   * (a house down payment, say) makes every smaller fund's bar look tiny
+   * by comparison. A "Show all funds" link appears whenever anything's
+   * hidden, to undo it. */
+  renderFundsOverviewChart(allFunds) {
+    const canvas = document.getElementById("funds-overview-chart");
+    const card = document.getElementById("funds-overview-card");
+    const resetBtn = document.getElementById("funds-overview-reset-btn");
+
+    if (!resetBtn.dataset.bound) {
+      resetBtn.dataset.bound = "true";
+      resetBtn.addEventListener("click", () => {
+        this.excludedFundIds.clear();
+        this.renderFundsOverviewChart(this.lastFundsForChart || []);
+      });
+    }
+    this.lastFundsForChart = allFunds;
+
+    if (!allFunds.length) {
+      if (this.fundsOverviewChart) { this.fundsOverviewChart.destroy(); this.fundsOverviewChart = null; }
+      card.style.display = "none";
+      return;
+    }
+    card.style.display = "";
+    resetBtn.style.display = this.excludedFundIds.size ? "" : "none";
+
+    const funds = allFunds.filter((f) => !this.excludedFundIds.has(f.id));
+    if (!funds.length) {
+      if (this.fundsOverviewChart) { this.fundsOverviewChart.destroy(); this.fundsOverviewChart = null; }
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
+
+    const labels = funds.map((f) => f.name);
+    const saved = funds.map((f) => Math.min(f.current_amount, f.target_amount || f.current_amount));
+    const remaining = funds.map((f) => Math.max((f.target_amount || 0) - f.current_amount, 0));
+    const overTarget = funds.map((f) => Math.max(f.current_amount - (f.target_amount || 0), 0));
+    const hasOverTarget = overTarget.some((v) => v > 0);
+
+    const datasets = [
+      { label: "Saved", data: saved, backgroundColor: "#C7A15C", stack: "s" },
+      { label: "Remaining", data: remaining, backgroundColor: "#3A4552", stack: "s" },
+    ];
+    if (hasOverTarget) datasets.push({ label: "Over target", data: overTarget, backgroundColor: "#74A788", stack: "s" });
+
+    if (this.fundsOverviewChart) this.fundsOverviewChart.destroy();
+    this.fundsOverviewChart = new Chart(canvas, {
+      type: "bar",
+      data: { labels, datasets },
+      options: {
+        indexAxis: "y",
+        scales: {
+          x: { stacked: true, ticks: { color: "#93A0AF", callback: (v) => formatCurrency(v) }, grid: { color: "#28323F" } },
+          y: { stacked: true, ticks: { color: "#93A0AF" }, grid: { display: false } },
+        },
+        plugins: {
+          legend: { labels: { color: "#E9E4D8", font: { family: "Inter" } } },
+          tooltip: { callbacks: { label: (item) => `${item.dataset.label}: ${formatCurrency(item.raw)}` } },
+        },
+        onHover: (evt, _elements, chart) => {
+          const inLabelGutter = evt.x !== null && evt.x < chart.chartArea.left;
+          canvas.style.cursor = inLabelGutter ? "pointer" : "default";
+        },
+        onClick: (evt, _elements, chart) => {
+          if (evt.x === null || evt.y === null || evt.x >= chart.chartArea.left) return;
+          const index = chart.scales.y.getValueForPixel(evt.y);
+          if (index === undefined || index === null || index < 0 || index >= funds.length) return;
+          this.excludedFundIds.add(funds[index].id);
+          this.renderFundsOverviewChart(this.lastFundsForChart);
+        },
+      },
+    });
+  },
+
   async refreshFunds() {
     const funds = await apiGet("/api/sinking_funds");
     const wrap = document.getElementById("funds-wrap");
+    this.renderFundsOverviewChart(funds);
     wrap.innerHTML = funds.map((f) => {
       const pct = f.target_amount > 0 ? Math.min(100, (f.current_amount / f.target_amount) * 100) : 0;
       const contribRows = [...f.contributions].sort((a, b) => (a.date < b.date ? 1 : -1));
+      const historyExpanded = this.expandedFundHistoryIds.has(f.id);
 
       return `
         <div class="fund-card">
           <div class="fund-card-head">
             <h3>${f.name}</h3>
-            <button class="btn-ghost" data-delete-fund="${f.id}">Remove</button>
+            <div class="fund-card-actions">
+              <button class="card-toggle-btn" data-toggle-fund-history="${f.id}" aria-expanded="${historyExpanded ? "true" : "false"}" aria-controls="fund-history-${f.id}">${historyExpanded ? "\u2212" : "+"}</button>
+              <button class="btn-ghost" data-delete-fund="${f.id}">Remove</button>
+            </div>
           </div>
           <div class="fund-progress-track"><div class="fund-progress-fill" style="width:0%" data-target-pct="${pct}"></div></div>
           <div class="fund-meta">
             <span>${formatCurrency(f.current_amount)} of ${formatCurrency(f.target_amount)} (${pct.toFixed(0)}%)</span>
             <span>${f.target_date ? `Target: ${f.target_date}` : ""}</span>
           </div>
-          <form class="fund-add-form" data-fund-id="${f.id}">
-            <input type="date" name="date" value="${todayISO()}" required />
-            <input type="number" step="0.01" name="amount" placeholder="Contribution amount" required />
-            <button type="submit">Add contribution</button>
-          </form>
 
-          <table class="ledger-table">
-            <thead><tr><th>Date</th><th>Amount</th><th></th></tr></thead>
-            <tbody>
-              ${contribRows.length
-                ? contribRows.map((c) => this.renderEditableRow(c, "fund-contrib", "amount")).join("")
-                : `<tr><td colspan="3" class="hint">No contributions logged yet.</td></tr>`}
-            </tbody>
-          </table>
+          <div class="fund-history ${historyExpanded ? "" : "collapsed"}" id="fund-history-${f.id}">
+            <form class="fund-add-form" data-fund-id="${f.id}">
+              <input type="date" name="date" value="${todayISO()}" required />
+              <input type="number" step="0.01" name="amount" placeholder="Contribution amount" required />
+              <button type="submit">Add contribution</button>
+            </form>
+
+            <table class="ledger-table">
+              <thead><tr><th>Date</th><th>Amount</th><th></th></tr></thead>
+              <tbody>
+                ${contribRows.length
+                  ? contribRows.map((c) => this.renderEditableRow(c, "fund-contrib", "amount")).join("")
+                  : `<tr><td colspan="3" class="hint">No contributions logged yet.</td></tr>`}
+              </tbody>
+            </table>
+          </div>
         </div>
       `;
     }).join("") || `<p class="hint">No sinking funds yet. Create one above.</p>`;
 
     animateBarFills(wrap.querySelectorAll(".fund-progress-fill"));
+
+    wrap.querySelectorAll("[data-toggle-fund-history]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = parseInt(btn.dataset.toggleFundHistory, 10);
+        const historyEl = document.getElementById(`fund-history-${id}`);
+        const nowExpanded = historyEl.classList.toggle("collapsed") === false;
+        if (nowExpanded) this.expandedFundHistoryIds.add(id);
+        else this.expandedFundHistoryIds.delete(id);
+        btn.textContent = nowExpanded ? "\u2212" : "+";
+        btn.setAttribute("aria-expanded", nowExpanded ? "true" : "false");
+      });
+    });
 
     wrap.querySelectorAll("[data-delete-fund]").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -541,7 +770,9 @@ const Track = {
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const fd = new FormData(form);
-        await apiPost(`/api/sinking_funds/${form.dataset.fundId}/contributions`, {
+        const fundId = form.dataset.fundId;
+        this.expandedFundHistoryIds.add(parseInt(fundId, 10));
+        await apiPost(`/api/sinking_funds/${fundId}/contributions`, {
           date: fd.get("date"),
           amount: parseFloat(fd.get("amount")) || 0,
         });
@@ -571,6 +802,50 @@ const Track = {
   /* =======================================================================
      TAB C — Net Worth Aggregator
      ======================================================================= */
+  /**
+   * All eight metrics for one account, in a single row, ordered the way
+   * you'd actually read them when sizing up an investment: first "how well
+   * did this do" (Simple Return -> CAGR -> XIRR -> TWRR, each a
+   * progressively more rigorous take on the same question), then "how
+   * bumpy was the ride" (Volatility, Max Drawdown, Drawdown Duration,
+   * Recovery Time — the last three describe the same single worst decline,
+   * so they're kept adjacent). See the backend's
+   * _compute_account_return_metrics() and _compute_risk_metrics() for the
+   * math. CAGR is flagged as "not cash-flow-adjusted" since it treats
+   * every contribution as if it happened on day one; XIRR and TWRR both
+   * account for actual dates (XIRR for your money, TWRR for the
+   * investment's performance independent of your money).
+   */
+  renderReturnMetrics(metrics) {
+    if (!metrics) return "";
+    const fmtPct = (v) => (v === null || v === undefined) ? "&mdash;" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+    const fmtPlainPct = (v) => (v === null || v === undefined) ? "&mdash;" : `${v.toFixed(1)}%`;
+    const fmtDays = (v) => (v === null || v === undefined) ? "&mdash;" : `${v} day${v === 1 ? "" : "s"}`;
+    const colorFor = (v) => (v === null || v === undefined) ? "var(--text-muted)" : (v < 0 ? "var(--negative)" : "var(--positive)");
+
+    let recovery;
+    if (metrics.recovery_days !== null && metrics.recovery_days !== undefined) recovery = fmtDays(metrics.recovery_days);
+    else if (metrics.recovered === false) recovery = "Not yet";
+    else recovery = "&mdash;";
+
+    const riskCells = metrics.num_return_periods ? `
+        <div><div class="figure-label">TWRR <span class="metric-note" title="Time-Weighted Rate of Return — links each valuation-to-valuation return together with contributions backed out, so it measures investment performance only, not your deposit timing.">(ann.)</span></div><div class="figure-value small" style="color:${colorFor(metrics.twrr_pct)}">${fmtPct(metrics.twrr_pct)}</div></div>
+        <div><div class="figure-label">Volatility <span class="metric-note" title="Standard deviation of the periodic returns, annualized. Higher = bumpier.">(ann.)</span></div><div class="figure-value small">${fmtPlainPct(metrics.annualized_volatility_pct)}</div></div>
+        <div><div class="figure-label">Max drawdown</div><div class="figure-value small" style="color:${colorFor(metrics.max_drawdown_pct)}">${fmtPlainPct(metrics.max_drawdown_pct)}</div></div>
+        <div><div class="figure-label">DD duration</div><div class="figure-value small">${fmtDays(metrics.drawdown_duration_days)}</div></div>
+        <div><div class="figure-label">Recovery</div><div class="figure-value small">${recovery}</div></div>
+    ` : "";
+
+    return `
+      <div class="account-return-metrics">
+        <div><div class="figure-label">Simple return</div><div class="figure-value small" style="color:${colorFor(metrics.simple_return_pct)}">${fmtPct(metrics.simple_return_pct)}</div></div>
+        <div><div class="figure-label">CAGR <span class="metric-note" title="Not cash-flow-adjusted — treats every contribution as if it happened on day one.">(naive)</span></div><div class="figure-value small" style="color:${colorFor(metrics.cagr_pct)}">${fmtPct(metrics.cagr_pct)}</div></div>
+        <div><div class="figure-label">XIRR <span class="metric-note" title="Annualized return, accounting for the actual date of every contribution.">(cash-flow adj.)</span></div><div class="figure-value small" style="color:${colorFor(metrics.xirr_pct)}">${fmtPct(metrics.xirr_pct)}</div></div>
+        ${riskCells}
+      </div>
+    `;
+  },
+
   async refreshAccounts() {
     const accounts = await apiGet("/api/accounts");
     const wrap = document.getElementById("accounts-wrap");
@@ -581,33 +856,45 @@ const Track = {
       const growth = latestValue - totalContributed;
       const contribRows = [...acc.contributions].sort((a, b) => (a.date < b.date ? 1 : -1));
       const valRows = [...acc.valuations].sort((a, b) => (a.date < b.date ? 1 : -1));
+      const historyExpanded = this.expandedAccountHistoryIds.has(acc.id);
 
       return `
         <div class="account-card">
           <div class="account-card-head">
             <h3>${acc.name}</h3>
             <span class="account-type-tag">${acc.account_type}</span>
-            <button class="btn-ghost" data-delete-account="${acc.id}">Remove</button>
+            <div class="account-card-actions">
+              <button class="card-toggle-btn" data-toggle-history="${acc.id}" aria-expanded="${historyExpanded ? "true" : "false"}" aria-controls="account-history-${acc.id}">${historyExpanded ? "\u2212" : "+"}</button>
+              <button class="btn-ghost" data-delete-account="${acc.id}">Remove</button>
+            </div>
           </div>
           <div class="account-figures">
             <div><div class="figure-label">Contributed</div><div class="figure-value">${formatCurrency(totalContributed)}</div></div>
             <div><div class="figure-label">Current value</div><div class="figure-value">${formatCurrency(latestValue)}</div></div>
             <div><div class="figure-label">Growth</div><div class="figure-value" style="color:${growth < 0 ? "var(--negative)" : "var(--positive)"}">${formatCurrency(growth)}</div></div>
           </div>
-          <div class="account-forms">
-            <form class="contribution-form" data-account-id="${acc.id}">
-              <input type="date" name="date" value="${todayISO()}" required />
-              <input type="number" step="0.01" name="amount" placeholder="Contribution" required />
-              <button type="submit">Log contribution</button>
-            </form>
-            <form class="valuation-form" data-account-id="${acc.id}">
-              <input type="date" name="date" value="${todayISO()}" required />
-              <input type="number" step="0.01" name="value" placeholder="Current value" required />
-              <button type="submit">Update value</button>
-            </form>
-          </div>
+          ${this.renderReturnMetrics(acc.metrics)}
 
-          <div class="account-history">
+          <div class="account-history ${historyExpanded ? "" : "collapsed"}" id="account-history-${acc.id}">
+            <div class="account-forms">
+              <form class="contribution-form" data-account-id="${acc.id}">
+                <input type="date" name="date" value="${todayISO()}" required />
+                <input type="number" step="0.01" name="amount" placeholder="Contribution" required />
+                <button type="submit">Log Contribution</button>
+              </form>
+              <form class="valuation-form" data-account-id="${acc.id}">
+                <input type="date" name="date" value="${todayISO()}" required />
+                <input type="number" step="0.01" name="value" placeholder="Current value" required />
+                <button type="submit">Update Value</button>
+              </form>
+              <form class="account-import-form" data-account-id="${acc.id}">
+                <input type="file" class="account-import-file" accept=".csv" required />
+                <button type="submit">Import CSV</button>
+              </form>
+            </div>
+            <div class="hint account-import-status" id="account-import-status-${acc.id}"></div>
+
+            <div class="account-history-tables">
             <div>
               <h3 class="subtable-heading">Contributions</h3>
               <table class="ledger-table">
@@ -630,10 +917,23 @@ const Track = {
                 </tbody>
               </table>
             </div>
+            </div>
           </div>
         </div>
       `;
     }).join("") || `<p class="hint">No accounts yet. Add one above.</p>`;
+
+    wrap.querySelectorAll("[data-toggle-history]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = parseInt(btn.dataset.toggleHistory, 10);
+        const historyEl = document.getElementById(`account-history-${id}`);
+        const nowExpanded = historyEl.classList.toggle("collapsed") === false;
+        if (nowExpanded) this.expandedAccountHistoryIds.add(id);
+        else this.expandedAccountHistoryIds.delete(id);
+        btn.textContent = nowExpanded ? "\u2212" : "+";
+        btn.setAttribute("aria-expanded", nowExpanded ? "true" : "false");
+      });
+    });
 
     wrap.querySelectorAll("[data-delete-account]").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -663,6 +963,49 @@ const Track = {
           value: parseFloat(fd.get("value")) || 0,
         });
         await this.refreshAccounts();
+      });
+    });
+
+    wrap.querySelectorAll(".account-import-form").forEach((form) => {
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const accountId = form.dataset.accountId;
+        const fileInput = form.querySelector(".account-import-file");
+        const statusEl = document.getElementById(`account-import-status-${accountId}`);
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        statusEl.textContent = "Importing...";
+        const submitBtn = form.querySelector("button[type=submit]");
+        submitBtn.disabled = true;
+
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+          const res = await fetch(`/api/accounts/${accountId}/import_csv`, { method: "POST", body: formData });
+          const result = await res.json();
+          if (!res.ok) throw new Error(result.error || `Server returned ${res.status}`);
+
+          const parts = [];
+          if (result.imported_contributions) parts.push(`${result.imported_contributions} contribution${result.imported_contributions === 1 ? "" : "s"} imported.`);
+          if (result.imported_valuations) parts.push(`${result.imported_valuations} valuation${result.imported_valuations === 1 ? "" : "s"} imported.`);
+          if (!result.imported_contributions && !result.imported_valuations) parts.push("No new rows imported.");
+          if (result.skipped_duplicate) parts.push(`${result.skipped_duplicate} already imported, skipped.`);
+          if (result.errors && result.errors.length) parts.push(`${result.errors.length} row(s) had errors: ${result.errors.slice(0, 3).join(" ")}`);
+
+          // The account card is about to be fully re-rendered by
+          // refreshAccounts() below, which wipes out this status message
+          // along with everything else — keep it in expandedAccountHistoryIds
+          // so the freshly-imported rows are immediately visible instead of
+          // requiring another click to expand the section that was just used.
+          this.expandedAccountHistoryIds.add(parseInt(accountId, 10));
+          await this.refreshAccounts();
+          const newStatusEl = document.getElementById(`account-import-status-${accountId}`);
+          if (newStatusEl) newStatusEl.textContent = parts.join(" ");
+        } catch (err) {
+          statusEl.textContent = `Import failed: ${err.message}`;
+          submitBtn.disabled = false;
+        }
       });
     });
 
@@ -757,5 +1100,231 @@ const Track = {
       this.accountsChartYear = (this.accountsChartYear || new Date().getFullYear()) + 1;
       this.renderAccountsChart(this.lastAccounts || []);
     });
+  },
+
+  /* =======================================================================
+     TAB D — Debt Payoff Tracker
+     ======================================================================= */
+  async refreshDebts() {
+    const debts = await apiGet("/api/debts");
+    const wrap = document.getElementById("debts-wrap");
+
+    const withSummaries = await Promise.all(debts.map(async (d) => {
+      try {
+        const summary = await apiGet(`/api/debts/${d.id}/summary`);
+        return { ...d, summary };
+      } catch (err) {
+        return { ...d, summary: null };
+      }
+    }));
+    this.lastDebts = withSummaries;
+
+    wrap.innerHTML = withSummaries.map((debt) => {
+      const historyExpanded = this.expandedDebtHistoryIds.has(debt.id);
+      const payments = [...debt.payments].sort((a, b) => (a.date < b.date ? 1 : -1));
+      const s = debt.summary || {};
+
+      let payoffFigure;
+      if (debt.current_balance <= 0.01) {
+        payoffFigure = `<div><div class="figure-label">Status</div><div class="figure-value small" style="color:var(--positive)">Paid off</div></div>`;
+      } else if (s.warning) {
+        payoffFigure = `<div><div class="figure-label">Projected payoff</div><div class="figure-value small" style="color:var(--negative)">Won't pay off</div></div>`;
+      } else {
+        payoffFigure = `<div><div class="figure-label">Projected payoff</div><div class="figure-value small">${s.payoff_date || "&mdash;"} (${s.months_to_payoff ?? "&mdash;"} mo)</div></div>`;
+      }
+
+      return `
+        <div class="account-card">
+          <div class="account-card-head">
+            <h3>${debt.name}</h3>
+            <span class="account-type-tag">${debt.debt_type}${debt.is_revolving ? " &middot; revolving" : ""}</span>
+            <div class="account-card-actions">
+              <button class="card-toggle-btn" data-toggle-debt-history="${debt.id}" aria-expanded="${historyExpanded ? "true" : "false"}" aria-controls="debt-history-${debt.id}">${historyExpanded ? "\u2212" : "+"}</button>
+              <button class="btn-ghost" data-delete-debt="${debt.id}">Remove</button>
+            </div>
+          </div>
+          <div class="account-figures">
+            <div><div class="figure-label">Balance</div><div class="figure-value">${formatCurrency(debt.current_balance)}</div></div>
+            <div><div class="figure-label">APR</div><div class="figure-value small">${Number(debt.apr).toFixed(2)}%</div></div>
+            <div><div class="figure-label">Min payment</div><div class="figure-value small">${formatCurrency(debt.minimum_payment)}</div></div>
+            ${payoffFigure}
+          </div>
+          ${s.warning ? `<p class="hint" style="color:var(--negative)">${s.warning}</p>` : ""}
+          ${(!s.warning && s.total_interest != null && debt.current_balance > 0.01) ? `<p class="hint">Projected to pay ${formatCurrency(s.total_interest)} in interest at the current minimum payment.</p>` : ""}
+
+          <div class="account-history ${historyExpanded ? "" : "collapsed"}" id="debt-history-${debt.id}">
+            <div class="account-forms">
+              <form class="debt-payment-form" data-debt-id="${debt.id}">
+                <input type="date" name="date" value="${todayISO()}" required />
+                <input type="number" step="0.01" name="amount" placeholder="Payment amount" required />
+                <button type="submit">Log payment</button>
+              </form>
+            </div>
+            <table class="ledger-table">
+              <thead><tr><th>Date</th><th>Amount</th><th>Principal</th><th>Interest</th><th></th></tr></thead>
+              <tbody>
+                ${payments.length ? payments.map((p) => `
+                  <tr>
+                    <td>${p.date}</td>
+                    <td class="num">${formatCurrency(p.amount)}</td>
+                    <td class="num">${formatCurrency(p.principal)}</td>
+                    <td class="num">${formatCurrency(p.interest)}</td>
+                    <td><button class="btn-ghost" data-delete-debt-payment="${p.id}">Delete</button></td>
+                  </tr>
+                `).join("") : `<tr><td colspan="5" class="hint">No payments logged yet.</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }).join("") || `<p class="hint">No debts yet. Add one above.</p>`;
+
+    wrap.querySelectorAll("[data-toggle-debt-history]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = parseInt(btn.dataset.toggleDebtHistory, 10);
+        const historyEl = document.getElementById(`debt-history-${id}`);
+        const nowExpanded = historyEl.classList.toggle("collapsed") === false;
+        if (nowExpanded) this.expandedDebtHistoryIds.add(id);
+        else this.expandedDebtHistoryIds.delete(id);
+        btn.textContent = nowExpanded ? "\u2212" : "+";
+        btn.setAttribute("aria-expanded", nowExpanded ? "true" : "false");
+      });
+    });
+
+    wrap.querySelectorAll("[data-delete-debt]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Remove this debt and its entire payment history? This can't be undone.")) return;
+        await apiDelete(`/api/debts/${btn.dataset.deleteDebt}`);
+        await this.refreshDebts();
+      });
+    });
+
+    wrap.querySelectorAll("[data-delete-debt-payment]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await apiDelete(`/api/debt_payments/${btn.dataset.deleteDebtPayment}`);
+        await this.refreshDebts();
+      });
+    });
+
+    wrap.querySelectorAll(".debt-payment-form").forEach((form) => {
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const fd = new FormData(form);
+        const debtId = form.dataset.debtId;
+        // Same reasoning as the Net Worth account import: keep the section
+        // expanded across the refresh below so the just-logged payment is
+        // immediately visible instead of needing a second click.
+        this.expandedDebtHistoryIds.add(parseInt(debtId, 10));
+        await apiPost(`/api/debts/${debtId}/payments`, {
+          date: fd.get("date"),
+          amount: parseFloat(fd.get("amount")) || 0,
+        });
+        await this.refreshDebts();
+      });
+    });
+
+    this.bindDebtForm();
+    this.bindPayoffPlanForm();
+  },
+
+  bindDebtForm() {
+    const form = document.getElementById("debt-form");
+    if (form.dataset.bound) return;
+    form.dataset.bound = "true";
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      await apiPost("/api/debts", {
+        name: fd.get("name"),
+        debt_type: fd.get("debt_type"),
+        is_revolving: fd.get("is_revolving") === "on",
+        current_balance: parseFloat(fd.get("current_balance")) || 0,
+        apr: parseFloat(fd.get("apr")) || 0,
+        minimum_payment: parseFloat(fd.get("minimum_payment")) || 0,
+        escrow_amount: parseFloat(fd.get("escrow_amount")) || 0,
+      });
+      form.reset();
+      await this.refreshDebts();
+    });
+  },
+
+  /** Snowball vs. Avalanche payoff simulation across every debt at once —
+   * see get_debt_payoff_plan() on the backend for the actual math. */
+  bindPayoffPlanForm() {
+    const form = document.getElementById("payoff-plan-form");
+    const exportBtn = document.getElementById("payoff-plan-export-btn");
+    if (form.dataset.bound) return;
+    form.dataset.bound = "true";
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const strategy = document.getElementById("payoff-strategy").value;
+      const extra = parseFloat(document.getElementById("payoff-extra-monthly").value) || 0;
+      const plan = await apiGet(`/api/debt_payoff_plan?strategy=${strategy}&extra_monthly=${extra}`);
+      this.lastPayoffPlan = plan;
+      this.renderPayoffPlan(plan);
+    });
+
+    exportBtn.addEventListener("click", async () => {
+      if (!this.lastPayoffPlan) return;
+      const debtById = new Map((this.lastDebts || []).map((d) => [d.id, d]));
+      const headers = ["Debt", "Monthly Payment", "Amount Paid Off", "Remaining Balance", "Paid off in (month #)"];
+      const rows = this.lastPayoffPlan.payoff_order.map((p) => {
+        const debt = debtById.get(p.id);
+        const amountPaid = debt ? debt.payments.reduce((s, pay) => s + (pay.principal || 0), 0) : null;
+        return [
+          p.name,
+          debt ? debt.minimum_payment : null,
+          amountPaid,
+          debt ? debt.current_balance : null,
+          p.month,
+        ];
+      });
+      await exportRowsAsExcel(headers, rows, "debt_payoff_plan", "Payoff Plan");
+    });
+  },
+
+  renderPayoffPlan(plan) {
+    const summaryEl = document.getElementById("payoff-plan-summary");
+    const table = document.getElementById("payoff-plan-table");
+    const tbody = table.querySelector("tbody");
+    const exportBtn = document.getElementById("payoff-plan-export-btn");
+
+    if (plan.months_to_debt_free === 0 && !plan.payoff_order.length) {
+      summaryEl.textContent = "No debts to pay off — you're debt-free!";
+      table.style.display = "none";
+      exportBtn.style.display = "none";
+      return;
+    }
+
+    if (plan.months_to_debt_free === null) {
+      summaryEl.textContent = "At this payment level, at least one debt's minimum payment doesn't cover its own interest — it'll never pay off. Try increasing the extra monthly amount.";
+      table.style.display = "none";
+      exportBtn.style.display = "none";
+      return;
+    }
+
+    const years = Math.floor(plan.months_to_debt_free / 12);
+    const months = plan.months_to_debt_free % 12;
+    const timeStr = [years ? `${years}y` : "", months ? `${months}mo` : ""].filter(Boolean).join(" ") || "0mo";
+
+    summaryEl.innerHTML = `Debt-free in <strong>${timeStr}</strong> (${plan.months_to_debt_free} months), paying about <strong>${formatCurrency(plan.total_interest)}</strong> in total interest under the ${plan.strategy} strategy.`;
+    table.style.display = "";
+
+    const debtById = new Map((this.lastDebts || []).map((d) => [d.id, d]));
+    tbody.innerHTML = plan.payoff_order.map((p) => {
+      const debt = debtById.get(p.id);
+      const amountPaid = debt ? debt.payments.reduce((s, pay) => s + (pay.principal || 0), 0) : null;
+      return `
+        <tr>
+          <td>${p.name}</td>
+          <td class="num">${debt ? formatCurrency(debt.minimum_payment) : "&mdash;"}</td>
+          <td class="num">${debt ? formatCurrency(amountPaid) : "&mdash;"}</td>
+          <td class="num">${debt ? formatCurrency(debt.current_balance) : "&mdash;"}</td>
+          <td class="num">Month ${p.month}</td>
+        </tr>
+      `;
+    }).join("");
+    exportBtn.style.display = "";
   },
 };
