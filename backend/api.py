@@ -39,7 +39,7 @@ def js(filename):
 
 
 # ---------------------------------------------------------------------------
-# PAGE 1 — BUDGET
+# PAGE 1 - BUDGET
 # ---------------------------------------------------------------------------
 @app.route("/api/budget/groups", methods=["GET", "POST"])
 def budget_groups():
@@ -85,6 +85,30 @@ def modify_line_item(item_id):
     body = request.get_json()
     db.update("budget_line_items", item_id, {"planned_amount": body["planned_amount"]})
     return "", 204
+
+
+@app.route("/api/budget/copy_forward_preview")
+def copy_forward_preview():
+    """Whether there's anything to offer copying forward from last month,
+    for the 'Copy last month's budget' prompt on the Budget page."""
+    month = request.args.get("month")
+    if not month:
+        return jsonify({"error": "month is required"}), 400
+    return jsonify(db.get_copy_forward_preview(month))
+
+
+@app.route("/api/budget/copy_forward", methods=["POST"])
+def copy_forward():
+    """Non-destructive month-to-month copy: adds last month's line items
+    that aren't already present this month, and leaves anything already
+    entered for this month untouched. Unlike applying a preset (which
+    clears the month first), this is safe to run even after starting to
+    build out the month by hand."""
+    body = request.get_json()
+    month = body.get("month")
+    if not month:
+        return jsonify({"error": "month is required"}), 400
+    return jsonify(db.copy_budget_forward(month)), 201
 
 
 @app.route("/api/budget/copy_month", methods=["POST"])
@@ -171,30 +195,40 @@ def income():
     return jsonify(db.get_income_summary(month))
 
 
-@app.route("/api/pay_schedule", methods=["GET", "PUT"])
-def pay_schedule():
-    if request.method == "PUT":
+@app.route("/api/pay_schedules", methods=["GET", "POST"])
+def pay_schedules():
+    if request.method == "POST":
         body = request.get_json()
-        db.save_pay_schedule(
+        new_id = db.create_pay_schedule(
+            name=body.get("name"),
             annual_income=body.get("annual_income", 0),
             anchor_date=body.get("anchor_date"),
             payments_per_year=body.get("payments_per_year", 26),
             start_date=body.get("start_date"),
             end_date=body.get("end_date"),
         )
+        return jsonify({"id": new_id}), 201
+    return jsonify(db.get_pay_schedules())
+
+
+@app.route("/api/pay_schedules/<int:schedule_id>", methods=["PUT", "DELETE"])
+def pay_schedule_detail(schedule_id):
+    if request.method == "DELETE":
+        db.delete_pay_schedule(schedule_id)
         return "", 204
-    schedule = db.get_pay_schedule()
-    return jsonify(schedule) if schedule else jsonify(None)
-
-
-@app.route("/api/pay_schedule/deductions", methods=["POST"])
-def add_pay_schedule_deduction():
     body = request.get_json()
-    new_id = db.add_pay_schedule_deduction(body["name"], body.get("amount", 0))
+    db.update_pay_schedule(schedule_id, body)
+    return "", 204
+
+
+@app.route("/api/pay_schedules/<int:schedule_id>/deductions", methods=["POST"])
+def add_pay_schedule_deduction(schedule_id):
+    body = request.get_json()
+    new_id = db.add_pay_schedule_deduction(schedule_id, body["name"], body.get("amount", 0))
     return jsonify({"id": new_id}), 201
 
 
-@app.route("/api/pay_schedule/deductions/<int:ded_id>", methods=["PUT", "DELETE"])
+@app.route("/api/pay_schedule_deductions/<int:ded_id>", methods=["PUT", "DELETE"])
 def modify_pay_schedule_deduction(ded_id):
     if request.method == "DELETE":
         db.delete("pay_schedule_deductions", ded_id)
@@ -204,16 +238,16 @@ def modify_pay_schedule_deduction(ded_id):
     return "", 204
 
 
-@app.route("/api/pay_schedule/investments", methods=["POST"])
-def add_pay_schedule_investment():
+@app.route("/api/pay_schedules/<int:schedule_id>/investments", methods=["POST"])
+def add_pay_schedule_investment(schedule_id):
     body = request.get_json()
     new_id = db.add_pay_schedule_investment(
-        body["name"], body.get("amount", 0), body.get("is_match", False)
+        schedule_id, body["name"], body.get("amount", 0), body.get("is_match", False)
     )
     return jsonify({"id": new_id}), 201
 
 
-@app.route("/api/pay_schedule/investments/<int:inv_id>", methods=["PUT", "DELETE"])
+@app.route("/api/pay_schedule_investments/<int:inv_id>", methods=["PUT", "DELETE"])
 def modify_pay_schedule_investment(inv_id):
     if request.method == "DELETE":
         db.delete("pay_schedule_investments", inv_id)
@@ -290,7 +324,7 @@ def modify_investment(investment_id):
 
 
 # ---------------------------------------------------------------------------
-# PAGE 2 / TAB A — DAILY LEDGER
+# PAGE 2 / TAB A - DAILY LEDGER
 # ---------------------------------------------------------------------------
 @app.route("/api/transactions", methods=["GET", "POST"])
 def transactions():
@@ -352,6 +386,26 @@ def modify_transaction(tx_id):
     return "", 204
 
 
+@app.route("/api/transactions/<int:tx_id>/split", methods=["POST"])
+def split_transaction(tx_id):
+    body = request.get_json()
+    splits = body.get("splits") or []
+    try:
+        result = db.split_transaction(tx_id, splits)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result), 201
+
+
+@app.route("/api/transactions/split_groups/<split_group_id>/unsplit", methods=["POST"])
+def unsplit_transaction(split_group_id):
+    try:
+        result = db.unsplit_transaction(split_group_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result), 201
+
+
 @app.route("/api/transactions/bulk_line_item", methods=["PUT"])
 def bulk_update_transaction_line_item():
     body = request.get_json()
@@ -389,6 +443,44 @@ def import_transactions():
     return jsonify(result), 200
 
 
+@app.route("/api/automate/rules", methods=["GET", "POST"])
+def automate_rules():
+    if request.method == "POST":
+        body = request.get_json()
+        try:
+            new_id = db.create_description_rule(
+                body.get("pattern"), body.get("group_name"), body.get("item_name")
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        applied = 0
+        if body.get("apply_to_existing"):
+            applied = db.apply_description_rule_to_existing(new_id, only_unassigned=bool(body.get("only_unassigned", True)))
+        return jsonify({"id": new_id, "applied": applied}), 201
+    return jsonify(db.get_description_rules())
+
+
+@app.route("/api/automate/rules/<int:rule_id>", methods=["PUT", "DELETE"])
+def automate_rule_detail(rule_id):
+    if request.method == "DELETE":
+        db.delete_description_rule(rule_id)
+        return "", 204
+    body = request.get_json()
+    try:
+        db.update_description_rule(rule_id, body)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return "", 204
+
+
+@app.route("/api/automate/rules/<int:rule_id>/apply", methods=["POST"])
+def automate_rule_apply(rule_id):
+    body = request.get_json(silent=True) or {}
+    updated = db.apply_description_rule_to_existing(rule_id, only_unassigned=bool(body.get("only_unassigned", True)))
+    return jsonify({"updated": updated})
+
+
 @app.route("/api/ledger_summary")
 def ledger_summary():
     """Planned / Spent / Remaining per line item for the Daily Ledger tab."""
@@ -402,7 +494,7 @@ def ledger_summary():
 
 
 # ---------------------------------------------------------------------------
-# Pending Credits — "Credit"-type import rows waiting to be routed into a
+# Pending Credits - "Credit"-type import rows waiting to be routed into a
 # Sinking Fund or dismissed (see db.import_transactions_csv).
 # ---------------------------------------------------------------------------
 @app.route("/api/pending_credits", methods=["GET"])
@@ -443,7 +535,7 @@ def dismiss_pending_credit(pending_id):
 
 
 # ---------------------------------------------------------------------------
-# PAGE 2 / TAB B — SINKING FUNDS & GOALS
+# PAGE 2 / TAB B - SINKING FUNDS & GOALS
 # ---------------------------------------------------------------------------
 @app.route("/api/sinking_funds", methods=["GET", "POST"])
 def sinking_funds():
@@ -496,23 +588,43 @@ def modify_fund_contribution(contribution_id):
 
 
 # ---------------------------------------------------------------------------
-# PAGE 2 / TAB C — NET WORTH AGGREGATOR
+# PAGE 2 / TAB C - NET WORTH AGGREGATOR
 # ---------------------------------------------------------------------------
 @app.route("/api/accounts", methods=["GET", "POST"])
 def accounts():
     if request.method == "POST":
         body = request.get_json()
         new_id = db.insert(
-            "accounts", {"name": body["name"], "account_type": body.get("account_type", "Investment")}
+            "accounts",
+            {
+                "name": body["name"],
+                "account_type": body.get("account_type", "Investment"),
+                "risk_profile": body.get("risk_profile", "moderate"),
+            },
         )
         return jsonify({"id": new_id}), 201
     return jsonify(db.get_net_worth_history())
 
 
-@app.route("/api/accounts/<int:account_id>", methods=["DELETE"])
-def delete_account(account_id):
-    db.delete("accounts", account_id)
+@app.route("/api/accounts/<int:account_id>", methods=["PUT", "DELETE"])
+def account_detail(account_id):
+    if request.method == "DELETE":
+        db.delete("accounts", account_id)
+        return "", 204
+    body = request.get_json()
+    fields = {k: body[k] for k in ("name", "account_type", "risk_profile") if k in body}
+    if not fields:
+        return jsonify({"error": "No editable fields provided."}), 400
+    db.update("accounts", account_id, fields)
     return "", 204
+
+
+@app.route("/api/portfolio/metrics")
+def portfolio_metrics():
+    # Reuses the existing generic /api/settings/<key> endpoint for the
+    # 'portfolio_risk_profile' preference (same pattern as color theme) --
+    # no dedicated settings route needed.
+    return jsonify(db.get_portfolio_metrics())
 
 
 @app.route("/api/accounts/<int:account_id>/import_csv", methods=["POST"])
@@ -570,7 +682,7 @@ def modify_valuation(valuation_id):
 
 
 # ---------------------------------------------------------------------------
-# PAGE 2 / TAB D — DEBT PAYOFF TRACKER
+# PAGE 2 / TAB D - DEBT PAYOFF TRACKER
 # ---------------------------------------------------------------------------
 @app.route("/api/debts", methods=["GET", "POST"])
 def debts():
@@ -646,7 +758,7 @@ def debt_payoff_plan():
 
 
 # ---------------------------------------------------------------------------
-# PAGE 3 — REPORTS
+# PAGE 3 - REPORTS
 # ---------------------------------------------------------------------------
 @app.route("/api/report/monthly_spending")
 def report_monthly_spending():
@@ -683,6 +795,17 @@ def report_savings_rate():
     return jsonify(db.get_savings_rate_series(year))
 
 
+@app.route("/api/report/tax_summary")
+def report_tax_summary():
+    year = request.args.get("year")
+    if not year:
+        return jsonify({"error": "year is required"}), 400
+    # Filing status has no dedicated table - it's just another key in the
+    # generic app_settings store, same as the color theme.
+    filing_status = db.get_setting("tax_filing_status", "single")
+    return jsonify(db.get_year_end_tax_summary(year, filing_status))
+
+
 @app.route("/api/report/net_worth_history")
 def report_net_worth_history():
     return jsonify(db.get_net_worth_history())
@@ -703,7 +826,7 @@ def annual_pdf():
 
 
 # ---------------------------------------------------------------------------
-# EXPORTS — Pandas -> Excel / CSV
+# EXPORTS - Pandas -> Excel / CSV
 # ---------------------------------------------------------------------------
 EXPORTABLE_TABLES = {
     "transactions", "budget_groups", "budget_line_items", "income",
@@ -741,8 +864,7 @@ def export_table(table):
 
 @app.route("/api/backup/export")
 def export_full_backup():
-    """
-    The comprehensive "Export to Excel" — one workbook, one sheet per table,
+    """The comprehensive "Export to Excel" - one workbook, one sheet per table,
     covering Budget + Track + Report data (everything BACKUP_TABLES lists).
     This exact file format is also what /api/backup/import expects back.
     """
@@ -765,7 +887,7 @@ def export_full_backup():
 @app.route("/api/backup/import", methods=["POST"])
 def import_full_backup():
     """Restores the database from a workbook produced by /api/backup/export.
-    Destructive for any sheet/table it recognizes — see
+    Destructive for any sheet/table it recognizes - see
     db.import_full_backup_data() for exactly what that means."""
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded."}), 400
@@ -799,8 +921,7 @@ def import_full_backup():
 
 @app.route("/api/export/generic", methods=["POST"])
 def export_generic():
-    """
-    Same Excel/CSV export as /api/export/<table>, but for computed report
+    """Same Excel/CSV export as /api/export/<table>, but for computed report
     tables that don't exist as a single raw DB table (Budget Adherence,
     Multi-Year Comparison, Savings Rate, Debt Payoff Plan, etc.) -- the
     frontend already has the rendered rows in hand, so it just posts them

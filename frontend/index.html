@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Ledger &mdash; Personal Finance &amp; Investment Tracker</title>
+<title>Ledger - Personal Finance &amp; Investment Tracker</title>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -13,12 +13,12 @@
 </head>
 <body>
 
-<!-- ============================================================
-     APP SHELL — left ledger spine (nav) + main content column
-     ============================================================ -->
+<!-- ======================================================================
+     APP SHELL - left ledger spine (nav) + main content column
+     ====================================================================== -->
 <div id="app-shell">
 
-  <!-- LEFT SPINE NAV — styled as tabbed ledger dividers -->
+  <!-- LEFT SPINE NAV - styled as tabbed ledger dividers -->
   <nav id="main-navbar">
     <div class="brand">
       <span class="brand-mark">&#9670;</span>
@@ -42,6 +42,10 @@
       <div class="nav-footer-group">
         <label for="global-month">Ledger Month</label>
         <input type="month" id="global-month" />
+        <div class="global-month-nav">
+          <button type="button" class="btn-ghost" id="global-month-prev" title="Previous month">&larr; Prev</button>
+          <button type="button" class="btn-ghost" id="global-month-next" title="Next month">Next &rarr;</button>
+        </div>
       </div>
       <div class="nav-footer-group">
         <label for="theme-select">Color Scheme</label>
@@ -93,53 +97,10 @@
           </div>
         </div>
         <div class="card-content" id="pay-schedule-content">
-        <p class="hint">Enter your annual income once. Deductions and investments below are <strong>per-paycheck</strong> amounts — they're multiplied automatically by however many paychecks land in the selected month (most months get 2, but a couple get 3, since 26 biweekly paychecks don't divide evenly into 12 months).</p>
+        <p class="hint">Add one pay schedule per job/income period - each has its own annual income, deductions, and investments, with a Start/End date range to say when it applied. Deductions and investments are <strong>per-paycheck</strong> amounts - they're multiplied automatically by however many paychecks land in the selected month (most months get 2, but a couple get 3, since 26 biweekly paychecks don't divide evenly into 12 months).</p>
 
-        <div class="pay-schedule-strip">
-          <div class="pay-schedule-col">
-            <h2>Pay Details</h2>
-            <form id="pay-schedule-form" class="pay-details-form">
-              <label for="ps-annual-income">Annual income</label>
-              <input type="number" step="0.01" id="ps-annual-income" placeholder="e.g. 78000" />
-              <label for="ps-anchor-date">A known pay date</label>
-              <input type="date" id="ps-anchor-date" />
-              <label for="ps-payments-per-year">Payments per year</label>
-              <input type="number" id="ps-payments-per-year" value="26" />
-              <button type="submit" class="btn">Save Pay Schedule</button>
-            </form>
-          </div>
-
-          <div class="pay-schedule-col">
-            <h2>Per-Paycheck Deductions</h2>
-            <div id="ps-deductions-list" class="mini-list"></div>
-            <form id="ps-deduction-form" class="inline-form">
-              <input type="text" name="name" placeholder="Taxes, insurance..." required />
-              <input type="number" step="0.01" name="amount" placeholder="Amount per check" required />
-              <button type="submit">Add</button>
-            </form>
-
-            <h2 class="pay-schedule-subheading">Active Income Dates</h2>
-            <form id="ps-dates-form" class="pay-details-form">
-              <label for="ps-start-date">Start date</label>
-              <input type="date" id="ps-start-date" />
-              <label for="ps-end-date">End date</label>
-              <input type="date" id="ps-end-date" />
-              <label class="checkbox-label"><input type="checkbox" id="ps-ongoing" /> On-going (no end date)</label>
-              <button type="submit" class="btn">Save Dates</button>
-            </form>
-          </div>
-
-          <div class="pay-schedule-col">
-            <h2>Per-Paycheck Investments</h2>
-            <div id="ps-investments-list" class="mini-list"></div>
-            <form id="ps-investment-form" class="inline-form">
-              <input type="text" name="name" placeholder="TSP, 401k..." required />
-              <input type="number" step="0.01" name="amount" placeholder="Amount per check" required />
-              <label class="checkbox-label"><input type="checkbox" name="is_match" /> Employer match</label>
-              <button type="submit">Add</button>
-            </form>
-          </div>
-        </div>
+        <div id="pay-schedules-wrap"></div>
+        <button type="button" class="btn" id="add-pay-schedule-btn">+ Add pay schedule</button>
         </div>
       </div>
 
@@ -181,6 +142,8 @@
           </div>
         </div>
 
+        <div id="copy-forward-banner" class="copy-forward-banner" style="display:none;"></div>
+
         <div id="budget-groups-wrap"></div>
 
         <form id="group-form" class="inline-form">
@@ -218,6 +181,7 @@
             <button type="button" class="tab-toggle-btn active" data-tx-action="log">Log</button>
             <button type="button" class="tab-toggle-btn" data-tx-action="import">Import</button>
             <button type="button" class="tab-toggle-btn" data-tx-action="search">Search</button>
+            <button type="button" class="tab-toggle-btn" data-tx-action="automate">Automate</button>
           </div>
 
           <div class="tx-action-panel active" id="tx-action-log">
@@ -236,7 +200,7 @@
           </div>
 
           <div class="tx-action-panel" id="tx-action-import">
-            <p class="hint">Upload a Truist "individual line items" CSV export. Each row is logged automatically with a best-guess Line Item — re-uploading the same date range won't create duplicates, and rows it can't confidently categorize are left unassigned for you to review below.</p>
+            <p class="hint">Upload a Truist "individual line items" CSV export. Each row is logged automatically with a best-guess Line Item - re-uploading the same date range won't create duplicates, and rows it can't confidently categorize are left unassigned for you to review below.</p>
             <form id="import-form" class="inline-form">
               <input type="file" id="import-file-input" accept=".csv" required />
               <button type="submit">Import CSV</button>
@@ -246,7 +210,7 @@
           </div>
 
           <div class="tx-action-panel" id="tx-action-search">
-            <p class="hint">Searches every transaction across all months — not just the currently selected Ledger Month.</p>
+            <p class="hint">Searches every transaction across all months - not just the currently selected Ledger Month.</p>
             <form id="tx-search-form" class="inline-form">
               <input type="text" name="q" placeholder="Description or merchant contains..." />
               <input type="date" name="date_from" title="From date" />
@@ -264,12 +228,30 @@
             <p id="tx-search-status" class="hint"></p>
           </div>
 
+          <div class="tx-action-panel" id="tx-action-automate">
+            <p class="hint">Create a rule once and every future import auto-categorizes it - "if the description contains this text anywhere, assign it to this Line Item."</p>
+            <form id="automate-rule-form" class="inline-form">
+              <input type="text" name="pattern" placeholder="Text to match, e.g. CHICK-FIL-A" required />
+              <select name="line_item_id" id="automate-rule-line-item-select" required></select>
+              <label class="inline-checkbox-label">
+                <input type="checkbox" name="apply_to_existing" checked />
+                Apply to existing unassigned transactions
+              </label>
+              <button type="submit">Add rule</button>
+            </form>
+            <table class="ledger-table" id="automate-rules-table" style="display:none;">
+              <thead><tr><th>Pattern</th><th>Line item</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <p id="automate-rules-empty" class="hint">No rules yet - add one above.</p>
+          </div>
+
           </div>
         </div>
 
         <div class="card" id="pending-credits-card" style="display:none;">
           <h2>Credits to Review</h2>
-          <p class="hint">"Credit" rows from an import (Zelle received, reimbursements, etc.) aren't logged as transactions automatically — add each one to a Sinking Fund, or to a budget category (logged as a refund that reduces that category's Spent total), or dismiss it if it doesn't need tracking.</p>
+          <p class="hint">"Credit" rows from an import (Zelle received, reimbursements, etc.) aren't logged as transactions automatically - add each one to a Sinking Fund, or to a budget category (logged as a refund that reduces that category's Spent total), or dismiss it if it doesn't need tracking.</p>
           <div id="pending-credits-wrap"></div>
         </div>
 
@@ -330,7 +312,7 @@
             <h2>Funds Overview</h2>
             <button type="button" class="btn-ghost" id="funds-overview-reset-btn" style="display:none;">Show all funds</button>
           </div>
-          <p class="hint">Progress toward every fund and goal, side by side. Click a fund's name on the left to hide it from this chart — handy when one large goal (like a house) dwarfs the smaller ones.</p>
+          <p class="hint">Progress toward every fund and goal, side by side. Click a fund's name on the left to hide it from this chart - handy when one large goal (like a house) dwarfs the smaller ones.</p>
           <canvas id="funds-overview-chart" height="160"></canvas>
         </div>
 
@@ -348,9 +330,26 @@
           <form id="account-form" class="inline-form">
             <input type="text" name="name" placeholder="e.g. Truist MMA, Vanguard Brokerage" required />
             <input type="text" name="account_type" placeholder="Type (Cash, Brokerage, Retirement...)" required />
+            <select name="risk_profile" title="How much volatility/drawdown is normal for this account -- drives the Investment Insights thresholds">
+              <option value="conservative">Risk profile: Low</option>
+              <option value="moderate" selected>Risk profile: Medium</option>
+              <option value="aggressive">Risk profile: High</option>
+            </select>
             <button type="submit">Add account</button>
           </form>
           </div>
+        </div>
+        <div class="card" id="portfolio-insights-card" style="display:none;">
+          <div class="chart-header-row">
+            <h2>Portfolio Insights</h2>
+            <select id="portfolio-risk-profile-select" title="How much volatility/drawdown is normal for the portfolio as a whole -- drives which of these insights fire">
+              <option value="conservative">Low</option>
+              <option value="moderate" selected>Medium</option>
+              <option value="aggressive">High</option>
+            </select>
+          </div>
+          <div class="account-return-metrics" id="portfolio-metrics-figures"></div>
+          <div class="insight-list" id="portfolio-insights-list"></div>
         </div>
         <div class="card" id="networth-chart-card" style="display:none;">
           <div class="chart-header-row">
@@ -389,8 +388,8 @@
             <input type="number" step="0.01" name="current_balance" placeholder="Current balance" required />
             <input type="number" step="0.01" name="apr" placeholder="APR %" required />
             <input type="number" step="0.01" name="minimum_payment" placeholder="Minimum payment" required />
-            <label class="checkbox-label"><input type="checkbox" name="is_revolving" /> Revolving (credit card — no fixed term)</label>
-            <input type="number" step="0.01" name="escrow_amount" placeholder="Escrow — taxes/insurance (optional)" />
+            <label class="checkbox-label"><input type="checkbox" name="is_revolving" /> Revolving (credit card - no fixed term)</label>
+            <input type="number" step="0.01" name="escrow_amount" placeholder="Escrow - taxes/insurance (optional)" />
             <button type="submit">Add debt</button>
           </form>
           </div>
@@ -404,8 +403,8 @@
           <p class="hint">Simulates paying every debt's minimum each month, with any extra funneled entirely into one target debt at a time until it's gone, then rolling forward.</p>
           <form id="payoff-plan-form" class="inline-form">
             <select id="payoff-strategy">
-              <option value="avalanche">Avalanche — highest APR first (minimizes total interest)</option>
-              <option value="snowball">Snowball — smallest balance first (fastest early wins)</option>
+              <option value="avalanche">Avalanche - highest APR first (minimizes total interest)</option>
+              <option value="snowball">Snowball - smallest balance first (fastest early wins)</option>
             </select>
             <input type="number" step="0.01" id="payoff-extra-monthly" placeholder="Extra $/month toward debt" value="0" />
             <button type="submit">Calculate</button>
@@ -434,59 +433,150 @@
         </div>
       </header>
 
-      <div class="report-grid-1-2">
-        <div class="card">
-          <h2>Monthly Spending</h2>
-          <p class="hint">Inner ring = budgeted, outer ring = actually spent. Both rings total your full Net Take-Home.</p>
-          <canvas id="spending-donut" height="260"></canvas>
-          <div id="donut-legend" class="manual-legend"></div>
+      <!-- Sub-navigation bar: This Month / Annual / Investments / Tax, plus the
+           single Report Year control that drives every annual/multi-year card
+           regardless of which sub-tab it lives on. Report Year defaults to
+           whatever year the global Ledger Month is currently on (see
+           Report.syncReportYearFromGlobalMonth in report.js) -- it can still
+           be moved independently from there without touching Ledger Month. -->
+      <div class="subnav report-subnav">
+        <div class="report-subnav-tabs">
+          <button class="report-subnav-tab active" data-report-subpage="thismonth">This Month</button>
+          <button class="report-subnav-tab" data-report-subpage="annual">Annual</button>
+          <button class="report-subnav-tab" data-report-subpage="investments">Investments</button>
+          <button class="report-subnav-tab" data-report-subpage="tax">Tax</button>
+        </div>
+        <div class="report-year-control">
+          <label for="report-year">Report Year</label>
+          <button type="button" class="btn-ghost" id="report-year-prev" title="Previous year">&larr;</button>
+          <input type="number" id="report-year" class="year-input" />
+          <button type="button" class="btn-ghost" id="report-year-next" title="Next year">&rarr;</button>
+        </div>
+      </div>
+
+      <!-- ---- Tab A: This Month ---- -->
+      <div id="report-subpage-thismonth" class="report-subpage active">
+        <div class="report-grid-1-2">
+          <div class="card">
+            <h2>Monthly Spending</h2>
+            <p class="hint">Inner ring = budgeted, outer ring = actually spent. Both rings total your full Net Take-Home.</p>
+            <canvas id="spending-donut" height="260"></canvas>
+            <div id="donut-legend" class="manual-legend"></div>
+          </div>
+
+          <div class="card">
+            <h2>Budget Adherence</h2>
+            <p class="hint">How closely actual spending is tracking to plan, based on transactions logged so far.</p>
+            <div id="adherence-overall" class="adherence-overall"></div>
+            <table class="ledger-table left-aligned" id="adherence-table">
+              <thead><tr><th>Group</th><th>Planned</th><th>Spent</th><th>% of Plan Used</th><th>% of Take-Home</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
 
         <div class="card">
-          <h2>Budget Adherence</h2>
-          <p class="hint">How closely actual spending is tracking to plan, based on transactions logged so far.</p>
-          <div id="adherence-overall" class="adherence-overall"></div>
-          <table class="ledger-table left-aligned" id="adherence-table">
-            <thead><tr><th>Group</th><th>Planned</th><th>Spent</th><th>% of Plan Used</th><th>% of Take-Home</th><th>Status</th></tr></thead>
+          <h2>Zero-Based Budget Flow</h2>
+          <p class="hint">Gross pay, traced through deductions, investments, and spending groups.</p>
+          <div id="budget-flow"></div>
+        </div>
+      </div>
+
+      <!-- ---- Tab B: Annual ---- -->
+      <div id="report-subpage-annual" class="report-subpage">
+        <div class="card">
+          <h2>Annual Trend</h2>
+          <canvas id="annual-trend-chart" height="180"></canvas>
+        </div>
+
+        <div class="card">
+          <h2>Multi-Year Comparison</h2>
+          <p class="hint">Total monthly spending overlaid across multiple years - pick which years to compare.</p>
+          <div id="multi-year-checklist" class="multi-year-checklist"></div>
+          <canvas id="multi-year-chart" height="180"></canvas>
+        </div>
+
+        <div class="card">
+          <h2>Savings Rate Over Time</h2>
+          <p class="hint">% of Net Take-Home each month that went to the "Savings" budget group.</p>
+          <canvas id="savings-rate-chart" height="180"></canvas>
+        </div>
+      </div>
+
+      <!-- ---- Tab C: Investments ---- -->
+      <div id="report-subpage-investments" class="report-subpage">
+        <div class="card">
+          <h2>Net Worth: Contributions vs. Market Value</h2>
+          <canvas id="net-worth-chart" height="195"></canvas>
+        </div>
+
+        <div class="card" id="report-insights-card" style="display:none;">
+          <h2>Investment Insights</h2>
+          <p class="hint">Plain-language flags for the blended portfolio and each account -- edit an account's Risk Profile on the Net Worth Aggregator tab to change these thresholds.</p>
+          <div id="report-insights-list"></div>
+        </div>
+      </div>
+
+      <!-- ---- Tab D: Tax ---- -->
+      <div id="report-subpage-tax" class="report-subpage">
+        <div class="card" id="tax-summary-card" style="display:none;">
+          <h2>Year-End Tax Summary</h2>
+          <p class="hint">Gross pay, pre-tax deductions, and pre-tax investments for the year, by income source - a starting point for tax prep, not a substitute for it.</p>
+          <table class="ledger-table" id="tax-summary-table">
+            <thead>
+              <tr><th>Source</th><th>Gross Pay</th><th>Deductions</th><th>Tax Withheld</th><th>Pre-Tax Investments</th><th>Employer Match</th><th>Net</th></tr>
+            </thead>
             <tbody></tbody>
+            <tfoot></tfoot>
           </table>
+
+          <!-- Estimated federal tax liability, using IRS marginal brackets
+               for the report year (falls back to the nearest year on file).
+               Filing status is persisted via the generic settings store,
+               same as the color theme. -->
+          <div class="tax-estimate-block">
+            <div class="tax-estimate-head">
+              <h3>Estimated Federal Tax</h3>
+              <div class="tax-filing-status-control">
+                <label for="tax-filing-status">Filing Status</label>
+                <select id="tax-filing-status">
+                  <option value="single">Single</option>
+                  <option value="mfj">Married Filing Jointly</option>
+                  <option value="hoh">Head of Household</option>
+                </select>
+              </div>
+            </div>
+            <p class="hint" id="tax-estimate-source-note"></p>
+            <div id="tax-estimate-summary" class="tax-estimate-summary"></div>
+            <table class="ledger-table left-aligned" id="tax-bracket-table">
+              <thead><tr><th>Rate</th><th>Bracket</th><th>Amount Taxed at This Rate</th><th>Tax</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
-      </div>
-
-      <div class="card">
-        <h2>Zero-Based Budget Flow</h2>
-        <p class="hint">Gross pay, traced through deductions, investments, and spending groups.</p>
-        <div id="budget-flow"></div>
-      </div>
-
-      <div class="card">
-        <h2>Annual Trend <input type="number" id="trend-year" class="year-input" /></h2>
-        <canvas id="annual-trend-chart" height="180"></canvas>
-      </div>
-
-      <div class="card">
-        <h2>Net Worth: Contributions vs. Market Value <input type="number" id="networth-history-year" class="year-input" /></h2>
-        <canvas id="net-worth-chart" height="195"></canvas>
-      </div>
-
-      <div class="card">
-        <h2>Multi-Year Comparison</h2>
-        <p class="hint">Total monthly spending overlaid across multiple years — pick which years to compare.</p>
-        <div id="multi-year-checklist" class="multi-year-checklist"></div>
-        <canvas id="multi-year-chart" height="180"></canvas>
-      </div>
-
-      <div class="card">
-        <h2>Savings Rate Over Time <input type="number" id="savings-rate-year" class="year-input" /></h2>
-        <p class="hint">% of Net Take-Home each month that went to the "Savings" budget group.</p>
-        <canvas id="savings-rate-chart" height="180"></canvas>
       </div>
     </section>
 
   </main>
 </div>
 
-<!-- Save as Preset modal -->
+<!-- ================= SPLIT TRANSACTION MODAL ================= -->
+<div class="modal-overlay" id="split-tx-modal">
+  <div class="modal-box wide">
+    <h2>Split Transaction</h2>
+    <p class="hint" id="split-tx-original-info"></p>
+    <div id="split-tx-rows"></div>
+    <button type="button" class="btn-ghost" id="split-tx-add-row-btn" style="margin-top:8px;">+ Add another part</button>
+    <div class="split-tx-remaining" id="split-tx-remaining"></div>
+    <div class="modal-status" id="split-tx-status"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="split-tx-cancel">Cancel</button>
+      <button class="btn" id="split-tx-confirm">Split</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= SAVE AS PRESET MODAL ================= -->
 <div class="modal-overlay" id="save-preset-modal">
   <div class="modal-box">
     <h2>Save as Preset</h2>
@@ -521,6 +611,10 @@
     </div>
   </div>
 </div>
+
+<!-- Floating toast stack - replaces native alert() for non-blocking status
+     messages (see showToast() in main.js). Top-right, auto-dismissing. -->
+<div id="toast-stack" aria-live="polite"></div>
 
 <script src="js/main.js"></script>
 <script src="js/budget.js"></script>

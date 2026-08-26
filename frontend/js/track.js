@@ -1,5 +1,5 @@
 /* =========================================================================
-   track.js — Page 2: Track (three sub-tabs)
+   track.js - Page 2: Track (three sub-tabs)
    ========================================================================= */
 
 const Track = {
@@ -22,26 +22,34 @@ const Track = {
   },
 
   /* =======================================================================
-     TAB A — Daily Ledger
+     TAB A - Daily Ledger
      ======================================================================= */
   async refreshLedger() {
     this.lineItemsForMonth = await apiGet(`/api/budget/line_items?month=${App.currentMonth}`);
     this.selectedTxIds.clear();
     this.populateLineItemSelect();
+    this.populateAutomateLineItemSelect();
     await this.populateFundSelect();
     await this.renderLedgerSummary();
     await this.renderTransactions();
     await this.renderPendingCredits();
+    await this.renderAutomateRules();
     this.bindLedgerForm();
     this.bindImportForm();
     this.bindBulkToolbar();
     this.bindTxSearchForm();
     this.bindTxActionToggle();
+    this.bindAutomateForm();
+    this.bindSplitModal();
+    autoExpandIfEmpty("tx-actions-card", (this.lastTransactions || []).length === 0);
   },
 
-  /** Log / Import / Search toggle bar for the combined Transactions card —
-   * purely a visual/navigation switch between the three panels; each
-   * panel's form and its event bindings are completely unchanged. */
+  /**
+   * Log / Import / Search / Automate toggle bar for the combined
+   * Transactions card - purely a visual/navigation switch between the four
+   * panels; each panel's form and its event bindings are completely
+   * unchanged.
+   */
   bindTxActionToggle() {
     const bar = document.getElementById("tx-actions-toggle");
     if (bar.dataset.bound) return;
@@ -56,13 +64,102 @@ const Track = {
     });
   },
 
+  /* ---- Automate: "if description contains X, categorize as Group > Item" rules ---- */
+  async renderAutomateRules() {
+    const rules = await apiGet("/api/automate/rules");
+    const table = document.getElementById("automate-rules-table");
+    const empty = document.getElementById("automate-rules-empty");
+    const tbody = table.querySelector("tbody");
+
+    if (!rules.length) {
+      table.style.display = "none";
+      empty.style.display = "";
+      return;
+    }
+    table.style.display = "";
+    empty.style.display = "none";
+
+    tbody.innerHTML = rules.map((r) => `
+      <tr data-rule-id="${r.id}">
+        <td><input type="text" class="automate-rule-pattern-input" value="${r.pattern.replace(/"/g, "&quot;")}" /></td>
+        <td><select class="automate-rule-item-select">${this.lineItemOptionsHtml(r.group_name, r.item_name)}</select></td>
+        <td><button type="button" class="btn-ghost" data-delete-rule="${r.id}">Remove</button></td>
+      </tr>
+    `).join("");
+
+    tbody.querySelectorAll(".automate-rule-pattern-input").forEach((input) => {
+      const original = input.value;
+      input.addEventListener("change", async () => {
+        const ruleId = input.closest("tr").dataset.ruleId;
+        if (!input.value.trim()) {
+          showToast("Pattern can't be empty.", "warning");
+          input.value = original;
+          return;
+        }
+        await apiPut(`/api/automate/rules/${ruleId}`, { pattern: input.value.trim() });
+      });
+    });
+
+    tbody.querySelectorAll(".automate-rule-item-select").forEach((select) => {
+      select.addEventListener("change", async () => {
+        const ruleId = select.closest("tr").dataset.ruleId;
+        const opt = select.selectedOptions[0];
+        await apiPut(`/api/automate/rules/${ruleId}`, { group_name: opt.dataset.group, item_name: opt.dataset.item });
+      });
+    });
+
+    tbody.querySelectorAll("[data-delete-rule]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Remove this Automate rule? Transactions already categorized by it won't be un-categorized.")) return;
+        await apiDelete(`/api/automate/rules/${btn.dataset.deleteRule}`);
+        await this.renderAutomateRules();
+      });
+    });
+  },
+
+  bindAutomateForm() {
+    const form = document.getElementById("automate-rule-form");
+    if (form.dataset.bound) return;
+    form.dataset.bound = "true";
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const select = document.getElementById("automate-rule-line-item-select");
+      const opt = select.selectedOptions[0];
+      if (!opt || !opt.dataset.group) {
+        showToast("Pick a Line Item for this rule.", "warning");
+        return;
+      }
+      try {
+        const result = await apiPost("/api/automate/rules", {
+          pattern: fd.get("pattern"),
+          group_name: opt.dataset.group,
+          item_name: opt.dataset.item,
+          apply_to_existing: fd.get("apply_to_existing") === "on",
+          only_unassigned: true,
+        });
+        form.reset();
+        await this.renderAutomateRules();
+        if (result.applied) {
+          await this.renderTransactions();
+          await this.renderLedgerSummary();
+        }
+        if (typeof result.applied === "number" && result.applied > 0) {
+          showToast(`Rule saved and applied to ${result.applied} existing unassigned transaction(s).`, "success");
+        }
+      } catch (err) {
+        showToast(`Couldn't save that rule: ${err.message}`, "error");
+      }
+    });
+  },
+
   /* ---- Pending Credits (Credit-type import rows awaiting fund routing) ---- */
   async renderPendingCredits() {
     const credits = await apiGet("/api/pending_credits");
     const card = document.getElementById("pending-credits-card");
     const wrap = document.getElementById("pending-credits-wrap");
 
-    // Not month-scoped like the rest of the Daily Ledger tab — a Credit
+    // Not month-scoped like the rest of the Daily Ledger tab - a Credit
     // row sits here until it's actioned, regardless of which Ledger Month
     // happens to be selected, so nothing gets lost behind the month picker.
     if (!credits.length) {
@@ -74,7 +171,7 @@ const Track = {
     const funds = await apiGet("/api/sinking_funds");
 
     // Budget categories are month-scoped, but pending credits can span many
-    // months (an import can cover a CSV's whole date range) — fetch each
+    // months (an import can cover a CSV's whole date range) - fetch each
     // distinct month's line items once rather than once per credit row.
     const months = [...new Set(credits.map((c) => c.date.slice(0, 7)))];
     const lineItemsByMonth = {};
@@ -110,7 +207,7 @@ const Track = {
       btn.addEventListener("click", async () => {
         const row = btn.closest(".credit-review-row");
         const dest = row.querySelector(".credit-dest-select").value;
-        if (!dest) { alert("Choose a Fund or Budget Category first."); return; }
+        if (!dest) { showToast("Choose a Fund or Budget Category first.", "warning"); return; }
         const [kind, idRaw] = dest.split("-");
         const targetId = parseInt(idRaw, 10);
 
@@ -131,7 +228,7 @@ const Track = {
           }
           await this.renderPendingCredits();
         } catch (err) {
-          alert(`Couldn't add that: ${err.message}`);
+          showToast(`Couldn't add that: ${err.message}`, "error");
           btn.disabled = false;
         }
       });
@@ -154,6 +251,28 @@ const Track = {
       .join("");
   },
 
+  /**
+   * Builds "Group > Item" <option>s from the current month's line items.
+   * If `currentGroup`/`currentItem` don't match anything in that list (the
+   * rule was created against a different month's categories), a disabled
+   * placeholder option is prepended so editing the row doesn't silently
+   * reassign it to whatever the first real option happens to be.
+   */
+  lineItemOptionsHtml(currentGroup, currentItem) {
+    const match = this.lineItemsForMonth.some((li) => li.group_name === currentGroup && li.name === currentItem);
+    const placeholder = (!match && currentGroup)
+      ? `<option value="" disabled selected data-group="${currentGroup}" data-item="${currentItem}">${currentGroup} &rsaquo; ${currentItem} (not in this month)</option>`
+      : "";
+    const options = this.lineItemsForMonth
+      .map((li) => `<option value="${li.id}" data-group="${li.group_name}" data-item="${li.name}" ${(!placeholder && li.group_name === currentGroup && li.name === currentItem) ? "selected" : ""}>${li.group_name} &rsaquo; ${li.name}</option>`)
+      .join("");
+    return placeholder + options;
+  },
+
+  populateAutomateLineItemSelect() {
+    document.getElementById("automate-rule-line-item-select").innerHTML = this.lineItemOptionsHtml();
+  },
+
   async populateFundSelect() {
     const funds = await apiGet("/api/sinking_funds");
     this.fundsForLedger = funds;
@@ -169,10 +288,10 @@ const Track = {
     tbody.innerHTML = summary.map((li) => {
       const hasPlan = li.planned_amount > 0;
       const pct = hasPlan ? (li.spent / li.planned_amount) * 100 : 0;
-      const barColor = pct > 100 ? "var(--negative)" : pct >= 90 ? "var(--accent)" : "var(--positive)";
+      const barColor = pct > 100 ? "var(--negative)" : pct >= 90 ? "var(--warning)" : "var(--positive)";
       const progressCell = hasPlan
         ? `<div class="progress-bar-track compact"><div class="progress-bar-fill" style="width:0%; background:${barColor}" data-target-pct="${Math.min(100, pct)}"></div></div>`
-        : `<span class="hint">&mdash;</span>`;
+        : `<span class="hint">N/A</span>`;
       return `
         <tr>
           <td>${li.group_name}</td>
@@ -183,14 +302,16 @@ const Track = {
           <td class="num ${li.remaining < 0 ? "negative" : "positive"}">${formatCurrency(li.remaining)}</td>
         </tr>
       `;
-    }).join("") || `<tr><td colspan="6" class="hint">No line items for this month yet — set up your budget first.</td></tr>`;
+    }).join("") || `<tr><td colspan="6" class="hint">No line items for this month yet - set up your budget first.</td></tr>`;
 
     animateBarFills(tbody.querySelectorAll(".progress-bar-fill"));
   },
 
-  /** Cross-month transaction search — the rest of the Daily Ledger tab is
+  /**
+   * Cross-month transaction search - the rest of the Daily Ledger tab is
    * scoped to whichever Ledger Month is currently selected; this hits
-   * every transaction regardless of month. */
+   * every transaction regardless of month.
+   */
   bindTxSearchForm() {
     const select = document.getElementById("tx-search-line-item");
     select.innerHTML = `<option value="">Any line item</option>` +
@@ -229,7 +350,7 @@ const Track = {
     tbody.innerHTML = results.map((tx) => `
       <tr>
         <td>${tx.date}</td>
-        <td>${tx.line_item_name ? `${tx.group_name} &rsaquo; ${tx.line_item_name}` : "&mdash; Unassigned &mdash;"}</td>
+        <td>${tx.line_item_name ? `${tx.group_name} &rsaquo; ${tx.line_item_name}` : "Unassigned"}</td>
         <td>${tx.description || ""}</td>
         <td>${tx.type}</td>
         <td class="num">${formatCurrency(tx.amount)}</td>
@@ -238,7 +359,7 @@ const Track = {
   },
 
   lineItemOptions(selectedId) {
-    const unassigned = `<option value="" ${!selectedId ? "selected" : ""}>&mdash; Unassigned &mdash;</option>`;
+    const unassigned = `<option value="" ${!selectedId ? "selected" : ""}>Unassigned</option>`;
     const rest = this.lineItemsForMonth.map((li) => `
       <option value="${li.id}" ${String(li.id) === String(selectedId) ? "selected" : ""}>${li.group_name} &rsaquo; ${li.name}</option>
     `).join("");
@@ -254,17 +375,33 @@ const Track = {
     tbody.innerHTML = txs.map((tx) => {
       const li = itemsById[tx.line_item_id];
       const checked = this.selectedTxIds.has(tx.id) ? "checked" : "";
+      const splitBadge = tx.split_group_id
+        ? `<span class="split-badge" title="Part of a split transaction">Split</span>`
+        : "";
+      // Unassigned rows with a real merchant description get a one-click
+      // shortcut into the Automate tab, pattern pre-filled, instead of
+      // requiring a trip there to retype it by hand.
+      const automateShortcut = (!li && tx.description)
+        ? `<button type="button" class="tx-automate-shortcut" data-automate-shortcut="${tx.id}" data-pattern="${tx.description.replace(/"/g, "&quot;")}">+ Automate rule</button>`
+        : "";
       return `
-        <tr data-tx-id="${tx.id}" data-date="${tx.date}" data-description="${(tx.description || "").replace(/"/g, "&quot;")}" data-amount="${tx.amount}" data-line-item-id="${tx.line_item_id || ""}" data-type="${tx.type || "expense"}">
+        <tr data-tx-id="${tx.id}" data-date="${tx.date}" data-description="${(tx.description || "").replace(/"/g, "&quot;")}" data-amount="${tx.amount}" data-line-item-id="${tx.line_item_id || ""}" data-type="${tx.type || "expense"}" data-split-group-id="${tx.split_group_id || ""}">
           <td class="cell-date">${tx.date}</td>
           <td class="cell-line-item">${li ? `${li.group_name} &rsaquo; ${li.name}` : `<span class="hint">Unassigned</span>`}</td>
-          <td class="cell-description">${tx.description || ""}</td>
+          <td class="cell-description">${tx.description || ""}${splitBadge}${automateShortcut}</td>
           <td class="cell-type">${tx.type === "income" ? "Income" : "Expense"}</td>
           <td class="num cell-amount">${formatCurrency(tx.amount)}</td>
           <td class="tx-checkbox-col"><input type="checkbox" class="tx-select" data-id="${tx.id}" ${checked} /></td>
           <td class="row-actions">
-            <button class="btn-ghost btn-tx-edit" data-id="${tx.id}">Edit</button>
-            <button class="btn-ghost" data-delete-tx="${tx.id}">&times;</button>
+            <div class="row-actions-menu">
+              <button type="button" class="row-actions-menu-btn" data-menu-toggle aria-haspopup="true" aria-expanded="false" title="Actions">&#8942;</button>
+              <div class="row-actions-menu-list">
+                <button type="button" class="btn-tx-edit" data-id="${tx.id}">Edit</button>
+                <button type="button" class="btn-tx-split" data-id="${tx.id}">Split</button>
+                ${tx.split_group_id ? `<button type="button" class="btn-tx-unsplit" data-split-group-id="${tx.split_group_id}">Un-split</button>` : ""}
+                <button type="button" class="danger" data-delete-tx="${tx.id}">Delete</button>
+              </div>
+            </div>
           </td>
         </tr>
       `;
@@ -292,9 +429,101 @@ const Track = {
       btn.addEventListener("click", () => this.toggleTxEdit(btn));
     });
 
+    tbody.querySelectorAll(".btn-tx-split").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const tx = this.lastTransactions.find((t) => String(t.id) === btn.dataset.id);
+        if (tx) this.openSplitModal(tx);
+      });
+    });
+
+    tbody.querySelectorAll(".btn-tx-unsplit").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Merge this split back into one transaction? The individual part assignments will be lost.")) return;
+        await apiPost(`/api/transactions/split_groups/${btn.dataset.splitGroupId}/unsplit`, {});
+        await this.renderLedgerSummary();
+        await this.renderTransactions();
+      });
+    });
+
+    tbody.querySelectorAll("[data-automate-shortcut]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.activateAutomateShortcut(btn.dataset.pattern);
+      });
+    });
+
+    this.bindRowActionsMenus(tbody);
+
     const selectAll = document.getElementById("tx-select-all");
     selectAll.checked = txs.length > 0 && this.selectedTxIds.size === txs.length;
     this.updateBulkToolbar();
+  },
+
+  /**
+   * Wires up the per-row "..." action menu: click to open/close, click
+   * anywhere else to close, and closes itself the moment any action inside
+   * it is clicked (so Edit/Split/Un-split/Delete don't leave a stray open
+   * popover behind). Re-bound on every render since the rows themselves
+   * are rebuilt each time, but the single document-level "click outside"
+   * listener is only ever attached once.
+   */
+  bindRowActionsMenus(tbody) {
+    tbody.querySelectorAll("[data-menu-toggle]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const menu = btn.closest(".row-actions-menu");
+        const wasOpen = menu.classList.contains("open");
+        document.querySelectorAll(".row-actions-menu.open").forEach((m) => {
+          m.classList.remove("open");
+          m.querySelector("[data-menu-toggle]").setAttribute("aria-expanded", "false");
+        });
+        if (!wasOpen) {
+          menu.classList.add("open");
+          btn.setAttribute("aria-expanded", "true");
+        }
+      });
+    });
+
+    tbody.querySelectorAll(".row-actions-menu-list").forEach((list) => {
+      list.addEventListener("click", (e) => {
+        if (e.target.tagName === "BUTTON") list.closest(".row-actions-menu").classList.remove("open");
+      });
+    });
+
+    if (!this._rowMenuDocBound) {
+      this._rowMenuDocBound = true;
+      document.addEventListener("click", () => {
+        document.querySelectorAll(".row-actions-menu.open").forEach((m) => {
+          m.classList.remove("open");
+          m.querySelector("[data-menu-toggle]").setAttribute("aria-expanded", "false");
+        });
+      });
+    }
+  },
+
+  /**
+   * Jumps straight to the Automate tab within the Transactions card,
+   * expanding the card if it's collapsed and pre-filling the pattern field
+   * with this transaction's description - so categorizing a recurring
+   * unassigned merchant doesn't require retyping its name by hand.
+   */
+  activateAutomateShortcut(patternText) {
+    const card = document.getElementById("tx-actions-card");
+    const toggleBtn = card.querySelector("[data-card-toggle]");
+    if (card.classList.contains("collapsed")) {
+      setCardCollapsed(card, toggleBtn, false);
+      apiPut(`/api/settings/card_collapsed_${card.id}`, { value: "false" }).catch(() => {});
+    }
+
+    const automateTabBtn = document.querySelector('#tx-actions-toggle [data-tx-action="automate"]');
+    if (automateTabBtn && !automateTabBtn.classList.contains("active")) automateTabBtn.click();
+
+    const patternInput = document.querySelector('#automate-rule-form input[name="pattern"]');
+    if (patternInput) patternInput.value = patternText;
+
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+    const lineItemSelect = document.getElementById("automate-rule-line-item-select");
+    if (lineItemSelect) lineItemSelect.focus();
   },
 
   toggleTxEdit(btn) {
@@ -315,7 +544,7 @@ const Track = {
     // Type is editable here specifically so a transaction that was ever
     // mislabeled on import (e.g. a bank export where every Amount is
     // positive regardless of direction, so a debit got tagged "income")
-    // can actually be corrected — Spent totals only ever sum type='expense'
+    // can actually be corrected - Spent totals only ever sum type='expense'
     // transactions, so without this control a mislabeled import could never
     // be fixed no matter what Line Item it was assigned to.
     row.querySelector(".cell-type").innerHTML = `
@@ -344,6 +573,97 @@ const Track = {
     });
     await this.renderLedgerSummary();
     await this.renderTransactions();
+  },
+
+  /* ---- Split Transaction modal ---- */
+  openSplitModal(tx) {
+    this.splitTxOriginal = tx;
+    document.getElementById("split-tx-original-info").textContent =
+      `${tx.date} \u00b7 ${tx.description || "(no description)"} \u00b7 Total: ${formatCurrency(tx.amount)}`;
+    document.getElementById("split-tx-rows").innerHTML = "";
+    document.getElementById("split-tx-status").textContent = "";
+    this.addSplitRow(tx.amount / 2, tx.description);
+    this.addSplitRow(tx.amount / 2, tx.description);
+    this.updateSplitRemaining();
+    document.getElementById("split-tx-modal").classList.add("open");
+  },
+
+  addSplitRow(amount, description) {
+    const row = document.createElement("div");
+    row.className = "split-tx-row";
+    row.innerHTML = `
+      <select class="split-line-item">${this.lineItemOptions("")}</select>
+      <input type="text" class="split-description" placeholder="Description (optional)" value="${(description || "").replace(/"/g, "&quot;")}" />
+      <input type="number" step="0.01" class="split-amount" value="${amount.toFixed(2)}" />
+      <button type="button" class="btn-ghost split-remove-row">&times;</button>
+    `;
+    document.getElementById("split-tx-rows").appendChild(row);
+    row.querySelector(".split-amount").addEventListener("input", () => this.updateSplitRemaining());
+    row.querySelector(".split-remove-row").addEventListener("click", () => {
+      row.remove();
+      this.updateSplitRemaining();
+    });
+  },
+
+  updateSplitRemaining() {
+    const rows = document.querySelectorAll("#split-tx-rows .split-tx-row");
+    const total = Array.from(rows).reduce(
+      (sum, r) => sum + (parseFloat(r.querySelector(".split-amount").value) || 0), 0
+    );
+    const remaining = this.splitTxOriginal.amount - total;
+    const el = document.getElementById("split-tx-remaining");
+    if (Math.abs(remaining) < 0.01) {
+      el.textContent = "Balanced - these amounts add up to the original total.";
+      el.className = "split-tx-remaining balanced";
+    } else if (remaining > 0) {
+      el.textContent = `${formatCurrency(remaining)} left to assign.`;
+      el.className = "split-tx-remaining unbalanced";
+    } else {
+      el.textContent = `${formatCurrency(-remaining)} over the original total.`;
+      el.className = "split-tx-remaining unbalanced";
+    }
+  },
+
+  bindSplitModal() {
+    if (this._splitModalBound) return;
+    this._splitModalBound = true;
+
+    const modal = document.getElementById("split-tx-modal");
+    const statusEl = document.getElementById("split-tx-status");
+    const confirmBtn = document.getElementById("split-tx-confirm");
+    const close = () => modal.classList.remove("open");
+
+    document.getElementById("split-tx-cancel").addEventListener("click", close);
+    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+    document.getElementById("split-tx-add-row-btn").addEventListener("click", () => this.addSplitRow(0, this.splitTxOriginal.description));
+
+    confirmBtn.addEventListener("click", async () => {
+      const rows = document.querySelectorAll("#split-tx-rows .split-tx-row");
+      const splits = Array.from(rows).map((r) => ({
+        line_item_id: r.querySelector(".split-line-item").value ? parseInt(r.querySelector(".split-line-item").value, 10) : null,
+        description: r.querySelector(".split-description").value,
+        amount: parseFloat(r.querySelector(".split-amount").value) || 0,
+      }));
+
+      confirmBtn.disabled = true;
+      statusEl.textContent = "Splitting...";
+      try {
+        const res = await fetch(`/api/transactions/${this.splitTxOriginal.id}/split`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ splits }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Server returned ${res.status}`);
+        close();
+        await this.renderLedgerSummary();
+        await this.renderTransactions();
+      } catch (err) {
+        statusEl.textContent = err.message;
+      } finally {
+        confirmBtn.disabled = false;
+      }
+    });
   },
 
   /* ---- Bulk line-item reassignment ---- */
@@ -381,7 +701,7 @@ const Track = {
       applyBtn.addEventListener("click", async () => {
         const lineItemId = document.getElementById("tx-bulk-line-item-select").value;
         if (!lineItemId) {
-          alert("Choose a Line Item to assign first.");
+          showToast("Choose a Line Item to assign first.", "warning");
           return;
         }
         const ids = [...this.selectedTxIds];
@@ -409,7 +729,7 @@ const Track = {
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          alert(`Couldn't delete: ${data.error || res.status}`);
+          showToast(`Couldn't delete: ${data.error || res.status}`, "error");
           return;
         }
         this.selectedTxIds.clear();
@@ -446,9 +766,9 @@ const Track = {
         const parts = [`Imported ${result.imported} transaction${result.imported === 1 ? "" : "s"}.`];
         if (result.skipped_duplicate) parts.push(`${result.skipped_duplicate} already imported, skipped.`);
         if (result.skipped_deposit_interest) parts.push(`${result.skipped_deposit_interest} Deposit/Interest row${result.skipped_deposit_interest === 1 ? "" : "s"} skipped (already reflected in Income).`);
-        if (result.pending_credits) parts.push(`${result.pending_credits} Credit row${result.pending_credits === 1 ? "" : "s"} ${result.pending_credits === 1 ? "is" : "are"} waiting below in "Credits to Review" — add each to a Sinking Fund or dismiss it.`);
-        if (result.unassigned) parts.push(`${result.unassigned} need a Line Item — select them below and use "Assign Line Item to Selected," or edit them individually.`);
-        if (result.transfer_count) parts.push(`${result.transfer_count} were categorized "Transfers & Payments" (internal transfers, card bill payments) — these may not be real spending; select them and use "Delete Selected" if you'd rather not track them.`);
+        if (result.pending_credits) parts.push(`${result.pending_credits} Credit row${result.pending_credits === 1 ? "" : "s"} ${result.pending_credits === 1 ? "is" : "are"} waiting below in "Credits to Review" - add each to a Sinking Fund or dismiss it.`);
+        if (result.unassigned) parts.push(`${result.unassigned} need a Line Item - select them below and use "Assign Line Item to Selected," or edit them individually.`);
+        if (result.transfer_count) parts.push(`${result.transfer_count} were categorized "Transfers & Payments" (internal transfers, card bill payments) - these may not be real spending; select them and use "Delete Selected" if you'd rather not track them.`);
         if (result.errors && result.errors.length) parts.push(`${result.errors.length} row(s) had errors: ${result.errors.slice(0, 3).join(" ")}`);
         statusEl.textContent = parts.join(" ");
 
@@ -459,7 +779,7 @@ const Track = {
         // the person has to notice and then act on manually.
         // Guarded with the null check below: if this element is ever missing
         // from index.html, the chip UI is skipped instead of throwing and
-        // aborting the rest of this handler — a prior version of this code
+        // aborting the rest of this handler - a prior version of this code
         // threw here on a missing element, which meant form.reset() and
         // refreshLedger() below never ran, leaving the Planned vs. Spent vs.
         // Remaining table stale even though the import itself had succeeded.
@@ -467,7 +787,7 @@ const Track = {
         if (monthNav) {
           if (result.months && result.months.length > 1) {
             monthNav.innerHTML =
-              `<span class="hint">This file covered ${result.months.length} months — jump to one to review it:</span> ` +
+              `<span class="hint">This file covered ${result.months.length} months - jump to one to review it:</span> ` +
               result.months.map((m) => `<button type="button" class="btn-ghost import-month-chip" data-month="${m}">${m}</button>`).join(" ");
             monthNav.style.display = "flex";
             monthNav.querySelectorAll(".import-month-chip").forEach((btn) => {
@@ -501,7 +821,7 @@ const Track = {
 
     // A logged Credit routes straight to a Sinking Fund contribution (same
     // destination as a pending-credit's "assign to fund" action) rather than
-    // becoming a transaction row, so the Line Item picker isn't relevant —
+    // becoming a transaction row, so the Line Item picker isn't relevant -
     // swap it out for the Fund picker instead.
     typeSelect.addEventListener("change", () => {
       const isCredit = typeSelect.value === "credit";
@@ -517,7 +837,7 @@ const Track = {
 
       if (type === "credit") {
         const fundId = fd.get("fund_id");
-        if (!fundId) { alert("Choose a Sinking Fund to credit first."); return; }
+        if (!fundId) { showToast("Choose a Sinking Fund to credit first.", "warning"); return; }
         await apiPost(`/api/sinking_funds/${fundId}/contributions`, {
           date: fd.get("date"),
           amount: parseFloat(fd.get("amount")) || 0,
@@ -616,20 +936,24 @@ const Track = {
   },
 
   /* =======================================================================
-     TAB B — Sinking Funds & Goals
+     TAB B - Sinking Funds & Goals
      ======================================================================= */
-  /** One stacked horizontal bar per fund/goal — Saved vs. Remaining (vs.
-   * Over target, for a fund that's exceeded its goal) — so progress across
-   * every fund is visible at a glance without opening each card. */
-  /** One stacked horizontal bar per fund/goal — Saved vs. Remaining (vs.
-   * Over target, for a fund that's exceeded its goal) — so progress across
+  /**
+   * One stacked horizontal bar per fund/goal - Saved vs. Remaining (vs.
+   * Over target, for a fund that's exceeded its goal) - so progress across
+   * every fund is visible at a glance without opening each card.
+   */
+  /**
+   * One stacked horizontal bar per fund/goal - Saved vs. Remaining (vs.
+   * Over target, for a fund that's exceeded its goal) - so progress across
    * every fund is visible at a glance without opening each card. Clicking
    * a fund's name in the Y-axis label gutter hides it from the chart
    * (kept in excludedFundIds so it stays hidden across refreshes, e.g.
-   * after logging a new contribution) — useful when one outsized goal
+   * after logging a new contribution) - useful when one outsized goal
    * (a house down payment, say) makes every smaller fund's bar look tiny
    * by comparison. A "Show all funds" link appears whenever anything's
-   * hidden, to undo it. */
+   * hidden, to undo it.
+   */
   renderFundsOverviewChart(allFunds) {
     const canvas = document.getElementById("funds-overview-chart");
     const card = document.getElementById("funds-overview-card");
@@ -687,13 +1011,12 @@ const Track = {
           tooltip: { callbacks: { label: (item) => `${item.dataset.label}: ${formatCurrency(item.raw)}` } },
         },
         onHover: (evt, _elements, chart) => {
-          const inLabelGutter = evt.x !== null && evt.x < chart.chartArea.left;
+          const inLabelGutter = this.fundLabelIndexAtEvent(chart, evt) !== null;
           canvas.style.cursor = inLabelGutter ? "pointer" : "default";
         },
         onClick: (evt, _elements, chart) => {
-          if (evt.x === null || evt.y === null || evt.x >= chart.chartArea.left) return;
-          const index = chart.scales.y.getValueForPixel(evt.y);
-          if (index === undefined || index === null || index < 0 || index >= funds.length) return;
+          const index = this.fundLabelIndexAtEvent(chart, evt);
+          if (index === null || index >= funds.length) return;
           this.excludedFundIds.add(funds[index].id);
           this.renderFundsOverviewChart(this.lastFundsForChart);
         },
@@ -701,8 +1024,31 @@ const Track = {
     });
   },
 
+  /**
+   * Returns the fund index whose Y-axis label the event is over, or null.
+   * Bounded to the y-scale's own box (yScale.left/right/top/bottom) rather
+   * than just "left of the plot area", since that alone has no vertical
+   * bound and can misfire on clicks up in the legend row. The index itself
+   * is computed as a direct proportion of the scale's own height rather
+   * than via Chart.js's scale.getValueForPixel(), which for a category
+   * scale used as a horizontal bar chart's index axis doesn't reliably
+   * account for the per-category band offset and can return the wrong
+   * index (or nothing at all).
+   */
+  fundLabelIndexAtEvent(chart, evt) {
+    if (evt.x === null || evt.y === null) return null;
+    const yScale = chart.scales.y;
+    if (evt.x < yScale.left || evt.x > yScale.right) return null;
+    if (evt.y < yScale.top || evt.y > yScale.bottom) return null;
+    const count = chart.data.labels.length;
+    if (!count) return null;
+    const index = Math.floor(((evt.y - yScale.top) / (yScale.bottom - yScale.top)) * count);
+    return Math.min(Math.max(index, 0), count - 1);
+  },
+
   async refreshFunds() {
     const funds = await apiGet("/api/sinking_funds");
+    autoExpandIfEmpty("new-fund-card", funds.length === 0);
     const wrap = document.getElementById("funds-wrap");
     this.renderFundsOverviewChart(funds);
     wrap.innerHTML = funds.map((f) => {
@@ -800,7 +1146,7 @@ const Track = {
   },
 
   /* =======================================================================
-     TAB C — Net Worth Aggregator
+     TAB C - Net Worth Aggregator
      ======================================================================= */
   /**
    * All eight metrics for one account, in a single row, ordered the way
@@ -808,7 +1154,7 @@ const Track = {
    * did this do" (Simple Return -> CAGR -> XIRR -> TWRR, each a
    * progressively more rigorous take on the same question), then "how
    * bumpy was the ride" (Volatility, Max Drawdown, Drawdown Duration,
-   * Recovery Time — the last three describe the same single worst decline,
+   * Recovery Time - the last three describe the same single worst decline,
    * so they're kept adjacent). See the backend's
    * _compute_account_return_metrics() and _compute_risk_metrics() for the
    * math. CAGR is flagged as "not cash-flow-adjusted" since it treats
@@ -818,18 +1164,18 @@ const Track = {
    */
   renderReturnMetrics(metrics) {
     if (!metrics) return "";
-    const fmtPct = (v) => (v === null || v === undefined) ? "&mdash;" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
-    const fmtPlainPct = (v) => (v === null || v === undefined) ? "&mdash;" : `${v.toFixed(1)}%`;
-    const fmtDays = (v) => (v === null || v === undefined) ? "&mdash;" : `${v} day${v === 1 ? "" : "s"}`;
+    const fmtPct = (v) => (v === null || v === undefined) ? "N/A" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+    const fmtPlainPct = (v) => (v === null || v === undefined) ? "N/A" : `${v.toFixed(1)}%`;
+    const fmtDays = (v) => (v === null || v === undefined) ? "N/A" : `${v} day${v === 1 ? "" : "s"}`;
     const colorFor = (v) => (v === null || v === undefined) ? "var(--text-muted)" : (v < 0 ? "var(--negative)" : "var(--positive)");
 
     let recovery;
     if (metrics.recovery_days !== null && metrics.recovery_days !== undefined) recovery = fmtDays(metrics.recovery_days);
     else if (metrics.recovered === false) recovery = "Not yet";
-    else recovery = "&mdash;";
+    else recovery = "N/A";
 
     const riskCells = metrics.num_return_periods ? `
-        <div><div class="figure-label">TWRR <span class="metric-note" title="Time-Weighted Rate of Return — links each valuation-to-valuation return together with contributions backed out, so it measures investment performance only, not your deposit timing.">(ann.)</span></div><div class="figure-value small" style="color:${colorFor(metrics.twrr_pct)}">${fmtPct(metrics.twrr_pct)}</div></div>
+        <div><div class="figure-label">TWRR <span class="metric-note" title="Time-Weighted Rate of Return - links each valuation-to-valuation return together with contributions backed out, so it measures investment performance only, not your deposit timing.">(ann.)</span></div><div class="figure-value small" style="color:${colorFor(metrics.twrr_pct)}">${fmtPct(metrics.twrr_pct)}</div></div>
         <div><div class="figure-label">Volatility <span class="metric-note" title="Standard deviation of the periodic returns, annualized. Higher = bumpier.">(ann.)</span></div><div class="figure-value small">${fmtPlainPct(metrics.annualized_volatility_pct)}</div></div>
         <div><div class="figure-label">Max drawdown</div><div class="figure-value small" style="color:${colorFor(metrics.max_drawdown_pct)}">${fmtPlainPct(metrics.max_drawdown_pct)}</div></div>
         <div><div class="figure-label">DD duration</div><div class="figure-value small">${fmtDays(metrics.drawdown_duration_days)}</div></div>
@@ -839,15 +1185,26 @@ const Track = {
     return `
       <div class="account-return-metrics">
         <div><div class="figure-label">Simple return</div><div class="figure-value small" style="color:${colorFor(metrics.simple_return_pct)}">${fmtPct(metrics.simple_return_pct)}</div></div>
-        <div><div class="figure-label">CAGR <span class="metric-note" title="Not cash-flow-adjusted — treats every contribution as if it happened on day one.">(naive)</span></div><div class="figure-value small" style="color:${colorFor(metrics.cagr_pct)}">${fmtPct(metrics.cagr_pct)}</div></div>
+        <div><div class="figure-label">CAGR <span class="metric-note" title="Not cash-flow-adjusted - treats every contribution as if it happened on day one.">(naive)</span></div><div class="figure-value small" style="color:${colorFor(metrics.cagr_pct)}">${fmtPct(metrics.cagr_pct)}</div></div>
         <div><div class="figure-label">XIRR <span class="metric-note" title="Annualized return, accounting for the actual date of every contribution.">(cash-flow adj.)</span></div><div class="figure-value small" style="color:${colorFor(metrics.xirr_pct)}">${fmtPct(metrics.xirr_pct)}</div></div>
         ${riskCells}
       </div>
     `;
   },
 
+  /**
+   * Renders the Investment Insights list (see db_manager.generate_investment_insights)
+   * as color-coded badges -- warnings first, then favorable/good flags, then
+   * neutral notes (e.g. "not enough history yet"). Used for both a single
+   * account's insights and the blended portfolio-level insights.
+   */
+  renderInsights(insights) {
+    return renderInsightBadges(insights);
+  },
+
   async refreshAccounts() {
     const accounts = await apiGet("/api/accounts");
+    autoExpandIfEmpty("new-account-card", accounts.length === 0);
     const wrap = document.getElementById("accounts-wrap");
 
     wrap.innerHTML = accounts.map((acc) => {
@@ -863,6 +1220,11 @@ const Track = {
           <div class="account-card-head">
             <h3>${acc.name}</h3>
             <span class="account-type-tag">${acc.account_type}</span>
+            <select class="account-risk-profile-select" data-account-id="${acc.id}" title="How much volatility/drawdown is normal for this account -- drives the Investment Insights thresholds">
+              <option value="conservative" ${acc.risk_profile === "conservative" ? "selected" : ""}>Risk: Low</option>
+              <option value="moderate" ${acc.risk_profile === "moderate" ? "selected" : ""}>Risk: Medium</option>
+              <option value="aggressive" ${acc.risk_profile === "aggressive" ? "selected" : ""}>Risk: High</option>
+            </select>
             <div class="account-card-actions">
               <button class="card-toggle-btn" data-toggle-history="${acc.id}" aria-expanded="${historyExpanded ? "true" : "false"}" aria-controls="account-history-${acc.id}">${historyExpanded ? "\u2212" : "+"}</button>
               <button class="btn-ghost" data-delete-account="${acc.id}">Remove</button>
@@ -874,20 +1236,24 @@ const Track = {
             <div><div class="figure-label">Growth</div><div class="figure-value" style="color:${growth < 0 ? "var(--negative)" : "var(--positive)"}">${formatCurrency(growth)}</div></div>
           </div>
           ${this.renderReturnMetrics(acc.metrics)}
+          ${this.renderInsights(acc.insights)}
 
           <div class="account-history ${historyExpanded ? "" : "collapsed"}" id="account-history-${acc.id}">
             <div class="account-forms">
               <form class="contribution-form" data-account-id="${acc.id}">
+                <h3>Contribution</h3>
                 <input type="date" name="date" value="${todayISO()}" required />
                 <input type="number" step="0.01" name="amount" placeholder="Contribution" required />
                 <button type="submit">Log Contribution</button>
               </form>
               <form class="valuation-form" data-account-id="${acc.id}">
+                <h3>Current Valuation</h3>
                 <input type="date" name="date" value="${todayISO()}" required />
                 <input type="number" step="0.01" name="value" placeholder="Current value" required />
                 <button type="submit">Update Value</button>
               </form>
               <form class="account-import-form" data-account-id="${acc.id}">
+                <h3>Import</h3>
                 <input type="file" class="account-import-file" accept=".csv" required />
                 <button type="submit">Import CSV</button>
               </form>
@@ -932,6 +1298,13 @@ const Track = {
         else this.expandedAccountHistoryIds.delete(id);
         btn.textContent = nowExpanded ? "\u2212" : "+";
         btn.setAttribute("aria-expanded", nowExpanded ? "true" : "false");
+      });
+    });
+
+    wrap.querySelectorAll(".account-risk-profile-select").forEach((select) => {
+      select.addEventListener("change", async () => {
+        await apiPut(`/api/accounts/${select.dataset.accountId}`, { risk_profile: select.value });
+        await this.refreshAccounts();
       });
     });
 
@@ -995,7 +1368,7 @@ const Track = {
 
           // The account card is about to be fully re-rendered by
           // refreshAccounts() below, which wipes out this status message
-          // along with everything else — keep it in expandedAccountHistoryIds
+          // along with everything else - keep it in expandedAccountHistoryIds
           // so the freshly-imported rows are immediately visible instead of
           // requiring another click to expand the section that was just used.
           this.expandedAccountHistoryIds.add(parseInt(accountId, 10));
@@ -1020,15 +1393,48 @@ const Track = {
         await apiPost("/api/accounts", {
           name: fd.get("name"),
           account_type: fd.get("account_type"),
+          risk_profile: fd.get("risk_profile") || "moderate",
         });
         accountForm.reset();
         await this.refreshAccounts();
       });
     }
 
+    await this.refreshPortfolioInsights();
+
     this.lastAccounts = accounts;
     this.bindAccountsChartYearNav();
     this.renderAccountsChart(accounts);
+  },
+
+  async refreshPortfolioInsights() {
+    const card = document.getElementById("portfolio-insights-card");
+    const select = document.getElementById("portfolio-risk-profile-select");
+
+    if (!select.dataset.bound) {
+      select.dataset.bound = "true";
+      let saved = "moderate";
+      try {
+        const setting = await apiGet("/api/settings/portfolio_risk_profile");
+        if (setting && setting.value) saved = setting.value;
+      } catch (err) {
+        // Fall back to Medium if the setting can't be read.
+      }
+      select.value = saved;
+      select.addEventListener("change", async () => {
+        await apiPut("/api/settings/portfolio_risk_profile", { value: select.value });
+        await this.refreshPortfolioInsights();
+      });
+    }
+
+    const portfolio = await apiGet("/api/portfolio/metrics");
+    if (!portfolio) {
+      card.style.display = "none";
+      return;
+    }
+    card.style.display = "";
+    document.getElementById("portfolio-metrics-figures").innerHTML = this.renderReturnMetrics(portfolio);
+    document.getElementById("portfolio-insights-list").innerHTML = this.renderInsights(portfolio.insights) || `<p class="hint">No flags for the blended portfolio at this risk profile.</p>`;
   },
 
   renderAccountsChart(accounts) {
@@ -1080,7 +1486,7 @@ const Track = {
       options: {
         maintainAspectRatio: false,
         scales: {
-          x: { ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
+          x: { ticks: { color: "#93A0AF", autoSkip: false, callback: monthOnlyTickCallback(dates) }, grid: { color: "#28323F" } },
           y: { ticks: { color: "#93A0AF" }, grid: { color: "#28323F" } },
         },
         plugins: { legend: { labels: { color: "#E9E4D8", font: { family: "Inter" } } } },
@@ -1103,10 +1509,11 @@ const Track = {
   },
 
   /* =======================================================================
-     TAB D — Debt Payoff Tracker
+     TAB D - Debt Payoff Tracker
      ======================================================================= */
   async refreshDebts() {
     const debts = await apiGet("/api/debts");
+    autoExpandIfEmpty("new-debt-card", debts.length === 0);
     const wrap = document.getElementById("debts-wrap");
 
     const withSummaries = await Promise.all(debts.map(async (d) => {
@@ -1130,7 +1537,7 @@ const Track = {
       } else if (s.warning) {
         payoffFigure = `<div><div class="figure-label">Projected payoff</div><div class="figure-value small" style="color:var(--negative)">Won't pay off</div></div>`;
       } else {
-        payoffFigure = `<div><div class="figure-label">Projected payoff</div><div class="figure-value small">${s.payoff_date || "&mdash;"} (${s.months_to_payoff ?? "&mdash;"} mo)</div></div>`;
+        payoffFigure = `<div><div class="figure-label">Projected payoff</div><div class="figure-value small">${s.payoff_date || "N/A"} (${s.months_to_payoff ?? "N/A"} mo)</div></div>`;
       }
 
       return `
@@ -1248,8 +1655,10 @@ const Track = {
     });
   },
 
-  /** Snowball vs. Avalanche payoff simulation across every debt at once —
-   * see get_debt_payoff_plan() on the backend for the actual math. */
+  /**
+   * Snowball vs. Avalanche payoff simulation across every debt at once -
+   * see get_debt_payoff_plan() on the backend for the actual math.
+   */
   bindPayoffPlanForm() {
     const form = document.getElementById("payoff-plan-form");
     const exportBtn = document.getElementById("payoff-plan-export-btn");
@@ -1291,14 +1700,14 @@ const Track = {
     const exportBtn = document.getElementById("payoff-plan-export-btn");
 
     if (plan.months_to_debt_free === 0 && !plan.payoff_order.length) {
-      summaryEl.textContent = "No debts to pay off — you're debt-free!";
+      summaryEl.textContent = "No debts to pay off - you're debt-free!";
       table.style.display = "none";
       exportBtn.style.display = "none";
       return;
     }
 
     if (plan.months_to_debt_free === null) {
-      summaryEl.textContent = "At this payment level, at least one debt's minimum payment doesn't cover its own interest — it'll never pay off. Try increasing the extra monthly amount.";
+      summaryEl.textContent = "At this payment level, at least one debt's minimum payment doesn't cover its own interest - it'll never pay off. Try increasing the extra monthly amount.";
       table.style.display = "none";
       exportBtn.style.display = "none";
       return;
@@ -1318,9 +1727,9 @@ const Track = {
       return `
         <tr>
           <td>${p.name}</td>
-          <td class="num">${debt ? formatCurrency(debt.minimum_payment) : "&mdash;"}</td>
-          <td class="num">${debt ? formatCurrency(amountPaid) : "&mdash;"}</td>
-          <td class="num">${debt ? formatCurrency(debt.current_balance) : "&mdash;"}</td>
+          <td class="num">${debt ? formatCurrency(debt.minimum_payment) : "N/A"}</td>
+          <td class="num">${debt ? formatCurrency(amountPaid) : "N/A"}</td>
+          <td class="num">${debt ? formatCurrency(debt.current_balance) : "N/A"}</td>
           <td class="num">Month ${p.month}</td>
         </tr>
       `;

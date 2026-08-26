@@ -58,8 +58,7 @@ def backup_database():
 
 
 class JSApi:
-    """
-    Exposed to the frontend as window.pywebview.api.* — needed because a
+    """Exposed to the frontend as window.pywebview.api.* - needed because a
     plain <a download> / blob-URL click has no browser download manager to
     catch it inside a chromeless native window, so files silently go
     nowhere. This instead opens a real native "Save As" dialog and writes
@@ -111,6 +110,7 @@ def main():
         width=1440,
         height=900,
         min_size=(1100, 700),
+        maximized=True,
         js_api=js_api,
     )
     js_api.set_window(window)

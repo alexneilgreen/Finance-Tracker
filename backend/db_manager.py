@@ -18,7 +18,7 @@ from pathlib import Path
 from contextlib import contextmanager
 
 # ---------------------------------------------------------------------------
-# Paths — resolved relative to this file so the app is fully portable
+# Paths - resolved relative to this file so the app is fully portable
 # (copy the whole finance_tracker/ folder anywhere and it still works).
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     import_category    TEXT,                     -- raw CSV "Category name", kept for mapping-learning
     import_subcategory TEXT,                     -- raw CSV "Sub-category name"
     import_merchant    TEXT,                    -- raw CSV "Merchant name"
+    split_group_id     TEXT,                     -- shared by every row a split transaction was divided into; NULL otherwise
     FOREIGN KEY (line_item_id) REFERENCES budget_line_items(id) ON DELETE SET NULL
 );
 
@@ -184,8 +185,17 @@ CREATE TABLE IF NOT EXISTS import_mappings (
     item_name   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS description_rules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern     TEXT NOT NULL,   -- substring searched for anywhere in a transaction's description, case-insensitive
+    group_name  TEXT NOT NULL,
+    item_name   TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS pay_schedule (
-    id                 INTEGER PRIMARY KEY CHECK (id = 1),  -- singleton row
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT NOT NULL DEFAULT 'Pay Schedule',  -- e.g. a job name, so multiple schedules (job changes over time) can coexist
     annual_income      REAL NOT NULL DEFAULT 0,
     anchor_date        TEXT,                      -- a known pay date, 'YYYY-MM-DD'
     payments_per_year  INTEGER NOT NULL DEFAULT 26,
@@ -194,40 +204,88 @@ CREATE TABLE IF NOT EXISTS pay_schedule (
 );
 
 CREATE TABLE IF NOT EXISTS pay_schedule_deductions (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    name    TEXT NOT NULL,
-    amount  REAL NOT NULL DEFAULT 0     -- per-paycheck amount
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    pay_schedule_id  INTEGER NOT NULL DEFAULT 1 REFERENCES pay_schedule(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    amount           REAL NOT NULL DEFAULT 0     -- per-paycheck amount
 );
 
 CREATE TABLE IF NOT EXISTS pay_schedule_investments (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    name      TEXT NOT NULL,
-    amount    REAL NOT NULL DEFAULT 0,  -- per-paycheck amount
-    is_match  INTEGER NOT NULL DEFAULT 0
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    pay_schedule_id  INTEGER NOT NULL DEFAULT 1 REFERENCES pay_schedule(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    amount           REAL NOT NULL DEFAULT 0,  -- per-paycheck amount
+    is_match         INTEGER NOT NULL DEFAULT 0
 );
 """
+
+
+def _migrate_pay_schedule_singleton(conn):
+    """The original pay_schedule table only ever allowed one row
+    (`id INTEGER PRIMARY KEY CHECK (id = 1)`), which blocked logging more
+    than one job/pay schedule over time -- e.g. one schedule for 2025 and a
+    different one for 2026 after a job change. Rebuilds the table to drop
+    that constraint the first time this runs against an older database,
+    carrying the existing row forward as the first schedule (kept at id=1
+    so its deductions/investments, which default to pay_schedule_id=1,
+    stay attached to it automatically). Safe to call on every startup --
+    it's a no-op once the table no longer has the old constraint, including
+    on a brand new database that never had it in the first place."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='pay_schedule'"
+    ).fetchone()
+    if not row or "CHECK (id = 1)" not in (row["sql"] or ""):
+        return
+
+    conn.execute("ALTER TABLE pay_schedule RENAME TO pay_schedule_old")
+    conn.execute("""
+        CREATE TABLE pay_schedule (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            name               TEXT NOT NULL DEFAULT 'Pay Schedule',
+            annual_income      REAL NOT NULL DEFAULT 0,
+            anchor_date        TEXT,
+            payments_per_year  INTEGER NOT NULL DEFAULT 26,
+            start_date         TEXT,
+            end_date           TEXT
+        )
+    """)
+    old = conn.execute("SELECT * FROM pay_schedule_old WHERE id = 1").fetchone()
+    if old:
+        conn.execute(
+            """INSERT INTO pay_schedule (id, name, annual_income, anchor_date, payments_per_year, start_date, end_date)
+               VALUES (1, 'Pay Schedule', ?, ?, ?, ?, ?)""",
+            (old["annual_income"], old["anchor_date"], old["payments_per_year"], old["start_date"], old["end_date"]),
+        )
+    conn.execute("DROP TABLE pay_schedule_old")
+    conn.commit()
 
 
 def init_db():
     """Create the database file and all tables if they don't already exist."""
     with get_conn() as conn:
+        _migrate_pay_schedule_singleton(conn)
         conn.executescript(SCHEMA)
         _ensure_column(conn, "investments", "is_match", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "transactions", "import_hash", "TEXT")
         _ensure_column(conn, "transactions", "import_category", "TEXT")
         _ensure_column(conn, "transactions", "import_subcategory", "TEXT")
         _ensure_column(conn, "transactions", "import_merchant", "TEXT")
+        _ensure_column(conn, "transactions", "split_group_id", "TEXT")
         _ensure_column(conn, "pending_credits", "resolved", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "pending_credits", "resolution", "TEXT")
         _ensure_column(conn, "pay_schedule", "start_date", "TEXT")
         _ensure_column(conn, "pay_schedule", "end_date", "TEXT")
+        _ensure_column(conn, "pay_schedule", "name", "TEXT NOT NULL DEFAULT 'Pay Schedule'")
+        _ensure_column(conn, "pay_schedule_deductions", "pay_schedule_id", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(conn, "pay_schedule_investments", "pay_schedule_id", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(conn, "contributions", "import_hash", "TEXT")
+        _ensure_column(conn, "accounts", "risk_profile", "TEXT NOT NULL DEFAULT 'moderate'")
         _ensure_column(conn, "valuations", "import_hash", "TEXT")
         conn.commit()
 
 
 def _ensure_column(conn, table, column, ddl_type):
-    """Adds a column if it's missing — lets older databases (from before this
+    """Adds a column if it's missing - lets older databases (from before this
     column existed) upgrade in place instead of breaking on launch."""
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in existing:
@@ -309,6 +367,64 @@ def get_line_items_for_month(month):
         return rows_to_dicts(rows)
 
 
+def _previous_month(month):
+    year, mo = (int(p) for p in month.split("-"))
+    return f"{year - 1}-12" if mo == 1 else f"{year}-{mo - 1:02d}"
+
+
+def get_copy_forward_preview(month):
+    """What copy_budget_forward(month) would do, without doing it -- lets
+    the frontend show 'Copy N line items from March 2025?' before the
+    person commits. Returns None if the previous month has nothing to
+    copy, or if this month already has every one of those line items
+    (nothing would actually change)."""
+    source_month = _previous_month(month)
+    source_items = get_line_items_for_month(source_month)
+    if not source_items:
+        return None
+
+    existing_names = {(li["group_name"], li["name"]) for li in get_line_items_for_month(month)}
+    new_items = [li for li in source_items if (li["group_name"], li["name"]) not in existing_names]
+    if not new_items:
+        return None
+
+    return {
+        "source_month": source_month,
+        "count": len(new_items),
+        "total_planned": sum(li["planned_amount"] for li in new_items),
+    }
+
+
+def copy_budget_forward(month):
+    """Copies every group/line item from the previous month into `month`,
+    carrying over each line item's planned_amount as a starting point.
+    Idempotent and additive: a line item already present this month (same
+    group + name) is left untouched rather than duplicated or overwritten,
+    so this is safe to run more than once (e.g. after manually adding a
+    couple of this month's items first, then copying the rest forward)."""
+    source_month = _previous_month(month)
+    source_items = get_line_items_for_month(source_month)
+    if not source_items:
+        return {"copied": 0, "source_month": source_month}
+
+    existing_names = {(li["group_name"], li["name"]) for li in get_line_items_for_month(month)}
+    with get_conn() as conn:
+        # Group ids are month-independent (budget_groups isn't scoped by
+        # month), so a source item's group_id can be reused directly --
+        # only budget_line_items rows need to be created for the new month.
+        copied = 0
+        for li in source_items:
+            if (li["group_name"], li["name"]) in existing_names:
+                continue
+            conn.execute(
+                "INSERT INTO budget_line_items (group_id, name, planned_amount, month) VALUES (?, ?, ?, ?)",
+                (li["group_id"], li["name"], li["planned_amount"], month),
+            )
+            copied += 1
+        conn.commit()
+    return {"copied": copied, "source_month": source_month}
+
+
 def get_spent_by_line_item(month):
     """Sum of expense transactions per line item, for a given month."""
     with get_conn() as conn:
@@ -325,7 +441,7 @@ def get_spent_by_line_item(month):
 
 
 # ---------------------------------------------------------------------------
-# Pay Schedule — for a fixed biweekly (or other N-payments-per-year) payroll,
+# Pay Schedule - for a fixed biweekly (or other N-payments-per-year) payroll,
 # lets the person enter their ANNUAL income once instead of re-entering a
 # paycheck every month. Deductions/investments are entered as PER-PAYCHECK
 # amounts; each month's actual totals are however many paychecks land in
@@ -333,41 +449,75 @@ def get_spent_by_line_item(month):
 # year get a 3rd, since 26 x 14 days is a few days short of a full year and
 # that drift eventually pushes a pay date across a month boundary).
 # ---------------------------------------------------------------------------
-def get_pay_schedule():
+def get_pay_schedules():
+    """Every pay schedule ever logged (e.g. one job's schedule that ended,
+    then a different job's that started) -- most recently started first."""
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM pay_schedule WHERE id = 1").fetchone()
+        rows = conn.execute(
+            "SELECT * FROM pay_schedule ORDER BY (start_date IS NULL), start_date DESC, id DESC"
+        ).fetchall()
+        schedules = rows_to_dicts(rows)
+        for s in schedules:
+            s["deductions"] = rows_to_dicts(
+                conn.execute(
+                    "SELECT * FROM pay_schedule_deductions WHERE pay_schedule_id = ? ORDER BY id", (s["id"],)
+                ).fetchall()
+            )
+            s["investments"] = rows_to_dicts(
+                conn.execute(
+                    "SELECT * FROM pay_schedule_investments WHERE pay_schedule_id = ? ORDER BY id", (s["id"],)
+                ).fetchall()
+            )
+        return schedules
+
+
+def get_pay_schedule(schedule_id):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM pay_schedule WHERE id = ?", (schedule_id,)).fetchone()
         if not row:
             return None
         schedule = dict(row)
         schedule["deductions"] = rows_to_dicts(
-            conn.execute("SELECT * FROM pay_schedule_deductions ORDER BY id").fetchall()
+            conn.execute(
+                "SELECT * FROM pay_schedule_deductions WHERE pay_schedule_id = ? ORDER BY id", (schedule_id,)
+            ).fetchall()
         )
         schedule["investments"] = rows_to_dicts(
-            conn.execute("SELECT * FROM pay_schedule_investments ORDER BY id").fetchall()
+            conn.execute(
+                "SELECT * FROM pay_schedule_investments WHERE pay_schedule_id = ? ORDER BY id", (schedule_id,)
+            ).fetchall()
         )
         return schedule
 
 
-def save_pay_schedule(annual_income, anchor_date, payments_per_year=26, start_date=None, end_date=None):
-    with get_conn() as conn:
-        conn.execute(
-            """INSERT INTO pay_schedule (id, annual_income, anchor_date, payments_per_year, start_date, end_date)
-               VALUES (1, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET
-                   annual_income = excluded.annual_income,
-                   anchor_date = excluded.anchor_date,
-                   payments_per_year = excluded.payments_per_year,
-                   start_date = excluded.start_date,
-                   end_date = excluded.end_date""",
-            (annual_income, anchor_date, payments_per_year, start_date, end_date),
-        )
-        conn.commit()
+def create_pay_schedule(name=None, annual_income=0, anchor_date=None, payments_per_year=26, start_date=None, end_date=None):
+    return insert("pay_schedule", {
+        "name": name or "Pay Schedule",
+        "annual_income": annual_income,
+        "anchor_date": anchor_date,
+        "payments_per_year": payments_per_year,
+        "start_date": start_date,
+        "end_date": end_date,
+    })
+
+
+def update_pay_schedule(schedule_id, fields):
+    allowed = {
+        k: v for k, v in fields.items()
+        if k in ("name", "annual_income", "anchor_date", "payments_per_year", "start_date", "end_date")
+    }
+    if allowed:
+        update("pay_schedule", schedule_id, allowed)
+
+
+def delete_pay_schedule(schedule_id):
+    delete("pay_schedule", schedule_id)  # ON DELETE CASCADE removes its deductions/investments too
 
 
 def _pay_dates_in_month(anchor_date_str, interval_days, month_str):
     """Every pay date that falls in month_str, given a fixed cadence of
     interval_days starting from anchor_date_str (which can be any known
-    pay date — past, present, or future — since the cadence is periodic)."""
+    pay date - past, present, or future - since the cadence is periodic)."""
     if not anchor_date_str or not interval_days:
         return []
     anchor = datetime.strptime(anchor_date_str, "%Y-%m-%d").date()
@@ -386,77 +536,160 @@ def _pay_dates_in_month(anchor_date_str, interval_days, month_str):
     return [d.strftime("%Y-%m-%d") for d in dates]
 
 
+# =========================================================================
+# Tax withholding / pre-tax benefit classification - used to build the
+# Tax Summary card's "Total Withheld for Taxes" figure and to estimate
+# taxable income for the bracket-based tax estimate. Deduction line items
+# only ever have a free-text `name` (e.g. "Federal Withholding", "Health
+# Insurance") with no structured category, so this is a best-effort keyword
+# match rather than something guaranteed correct - anything that doesn't
+# match either list falls into "other" and is left out of both totals
+# rather than guessed at.
+# =========================================================================
+_TAX_WITHHOLDING_KEYWORDS = (
+    "federal", "fed tax", "fed income", "state tax", "state income",
+    "local tax", "city tax", "income tax", "withholding", "fica",
+    "social security", "medicare", "oasdi",
+)
+_PRETAX_BENEFIT_KEYWORDS = (
+    "401k", "401(k)", "403b", "403(b)", "457", "hsa", "fsa",
+    "health insurance", "medical", "dental", "vision", "pretax", "pre-tax",
+)
+
+
+def _classify_deduction(name):
+    """Returns 'tax_withholding', 'pretax_benefit', or 'other' for a
+    deduction's free-text name. See module note above for caveats."""
+    n = (name or "").lower()
+    if any(k in n for k in _TAX_WITHHOLDING_KEYWORDS):
+        return "tax_withholding"
+    if any(k in n for k in _PRETAX_BENEFIT_KEYWORDS):
+        return "pretax_benefit"
+    return "other"
+
+
 def get_pay_schedule_summary(month):
-    """Returns this month's pay-schedule-derived totals, or None if no
-    schedule has been configured yet."""
-    schedule = get_pay_schedule()
-    if not schedule or not schedule["anchor_date"] or schedule["annual_income"] <= 0:
+    """Returns this month's combined pay-schedule-derived totals across
+    every pay schedule whose active window overlaps `month` -- so a job
+    change partway through the timeline (schedule A ends, schedule B
+    starts) is handled by just logging a second schedule with its own
+    start/end date, rather than needing one schedule to somehow cover
+    both jobs. Returns None if no schedule contributes anything this month."""
+    schedules = get_pay_schedules()
+    year, mo = (int(p) for p in month.split("-"))
+    month_start = f"{month}-01"
+    next_month_start = f"{year + 1}-01-01" if mo == 12 else f"{year}-{mo + 1:02d}-01"
+
+    payment_count = 0
+    pay_dates = []
+    gross = 0.0
+    total_deductions = 0.0
+    total_investments = 0.0
+    total_match = 0.0
+    total_tax_withheld = 0.0
+    total_pretax_benefits = 0.0
+    all_deductions = []
+    all_investments = []
+    per_schedule = []
+
+    for schedule in schedules:
+        if not schedule["anchor_date"] or schedule["annual_income"] <= 0:
+            continue
+        # Skip schedules whose active window can't possibly overlap this
+        # month at all, before bothering to compute pay dates.
+        if schedule.get("start_date") and schedule["start_date"] >= next_month_start:
+            continue
+        if schedule.get("end_date") and schedule["end_date"] < month_start:
+            continue
+
+        interval_days = round(365.25 / schedule["payments_per_year"])
+        dates = _pay_dates_in_month(schedule["anchor_date"], interval_days, month)
+        if schedule.get("start_date"):
+            dates = [d for d in dates if d >= schedule["start_date"]]
+        if schedule.get("end_date"):
+            dates = [d for d in dates if d <= schedule["end_date"]]
+        if not dates:
+            continue
+
+        count = len(dates)
+        per_check_gross = schedule["annual_income"] / schedule["payments_per_year"]
+        per_check_deductions = sum(d["amount"] for d in schedule["deductions"])
+        per_check_investments = sum(i["amount"] for i in schedule["investments"] if not i["is_match"])
+        per_check_match = sum(i["amount"] for i in schedule["investments"] if i["is_match"])
+        per_check_tax_withheld = sum(
+            d["amount"] for d in schedule["deductions"] if _classify_deduction(d["name"]) == "tax_withholding"
+        )
+        per_check_pretax_benefits = sum(
+            d["amount"] for d in schedule["deductions"] if _classify_deduction(d["name"]) == "pretax_benefit"
+        )
+
+        schedule_gross = per_check_gross * count
+        schedule_deductions = per_check_deductions * count
+        schedule_investments = per_check_investments * count
+        schedule_match = per_check_match * count
+        schedule_tax_withheld = per_check_tax_withheld * count
+        schedule_pretax_benefits = per_check_pretax_benefits * count
+
+        payment_count += count
+        pay_dates.extend(dates)
+        gross += schedule_gross
+        total_deductions += schedule_deductions
+        total_investments += schedule_investments
+        total_match += schedule_match
+        total_tax_withheld += schedule_tax_withheld
+        total_pretax_benefits += schedule_pretax_benefits
+        all_deductions.extend(schedule["deductions"])
+        all_investments.extend(schedule["investments"])
+        per_schedule.append({
+            "id": schedule["id"], "name": schedule["name"],
+            "payment_count": count, "pay_dates": dates, "per_check_gross": per_check_gross,
+            "gross": schedule_gross, "total_deductions": schedule_deductions,
+            "total_investments": schedule_investments, "total_match": schedule_match,
+            "total_tax_withheld": schedule_tax_withheld, "total_pretax_benefits": schedule_pretax_benefits,
+        })
+
+    if not per_schedule:
         return None
 
-    interval_days = round(365.25 / schedule["payments_per_year"])
-    pay_dates = _pay_dates_in_month(schedule["anchor_date"], interval_days, month)
-
-    # Restrict to the schedule's active window: start_date/end_date are
-    # optional bounds (e.g. a job that started or ended mid-year), and a
-    # blank end_date means "on-going" so no upper bound is applied.
-    start_date = schedule.get("start_date")
-    end_date = schedule.get("end_date")
-    if start_date:
-        pay_dates = [d for d in pay_dates if d >= start_date]
-    if end_date:
-        pay_dates = [d for d in pay_dates if d <= end_date]
-
-    count = len(pay_dates)
-
-    per_check_gross = schedule["annual_income"] / schedule["payments_per_year"]
-    per_check_deductions = sum(d["amount"] for d in schedule["deductions"])
-    per_check_investments = sum(i["amount"] for i in schedule["investments"] if not i["is_match"])
-    per_check_match = sum(i["amount"] for i in schedule["investments"] if i["is_match"])
-
-    gross = per_check_gross * count
-    total_deductions = per_check_deductions * count
-    total_investments = per_check_investments * count
-    total_match = per_check_match * count
-
+    pay_dates.sort()
     return {
-        "payment_count": count,
+        "payment_count": payment_count,
         "pay_dates": pay_dates,
-        "per_check_gross": per_check_gross,
-        "per_check_deductions": per_check_deductions,
-        "per_check_investments": per_check_investments,
-        "per_check_match": per_check_match,
         "gross": gross,
         "total_deductions": total_deductions,
         "total_investments": total_investments,
         "total_match": total_match,
+        "total_tax_withheld": total_tax_withheld,
+        "total_pretax_benefits": total_pretax_benefits,
         "net_take_home": gross - total_deductions - total_investments,
-        "deductions": schedule["deductions"],
-        "investments": schedule["investments"],
+        "deductions": all_deductions,
+        "investments": all_investments,
+        "schedules": per_schedule,  # per-schedule breakdown, e.g. for a month that straddles a job change
     }
 
 
-def add_pay_schedule_deduction(name, amount):
+def add_pay_schedule_deduction(schedule_id, name, amount):
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO pay_schedule_deductions (name, amount) VALUES (?, ?)", (name, amount)
+            "INSERT INTO pay_schedule_deductions (pay_schedule_id, name, amount) VALUES (?, ?, ?)",
+            (schedule_id, name, amount),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def add_pay_schedule_investment(name, amount, is_match):
+def add_pay_schedule_investment(schedule_id, name, amount, is_match):
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO pay_schedule_investments (name, amount, is_match) VALUES (?, ?, ?)",
-            (name, amount, 1 if is_match else 0),
+            "INSERT INTO pay_schedule_investments (pay_schedule_id, name, amount, is_match) VALUES (?, ?, ?, ?)",
+            (schedule_id, name, amount, 1 if is_match else 0),
         )
         conn.commit()
         return cur.lastrowid
 
 
 def get_income_summary(month):
-    """
-    Returns gross pay, total deductions, total EMPLOYEE pre-tax investments,
+    """Returns gross pay, total deductions, total EMPLOYEE pre-tax investments,
     total employer MATCH (informational only), and net take-home for a given
     month, plus each income row with its own nested deductions/investments
     so the Budget page can list, edit, and delete them individually.
@@ -480,6 +713,8 @@ def get_income_summary(month):
         total_deductions = 0.0
         total_investments = 0.0  # employee contributions only
         total_match = 0.0        # employer match, informational only
+        total_tax_withheld = 0.0
+        total_pretax_benefits = 0.0
 
         for r in income_rows:
             gross += r["gross_amount"]
@@ -501,6 +736,8 @@ def get_income_summary(month):
             total_deductions += sum(d["amount"] for d in ded_rows)
             total_investments += sum(i["amount"] for i in inv_rows if not i["is_match"])
             total_match += sum(i["amount"] for i in inv_rows if i["is_match"])
+            total_tax_withheld += sum(d["amount"] for d in ded_rows if _classify_deduction(d["name"]) == "tax_withholding")
+            total_pretax_benefits += sum(d["amount"] for d in ded_rows if _classify_deduction(d["name"]) == "pretax_benefit")
 
         schedule_summary = get_pay_schedule_summary(month)
         if schedule_summary:
@@ -508,6 +745,8 @@ def get_income_summary(month):
             total_deductions += schedule_summary["total_deductions"]
             total_investments += schedule_summary["total_investments"]
             total_match += schedule_summary["total_match"]
+            total_tax_withheld += schedule_summary["total_tax_withheld"]
+            total_pretax_benefits += schedule_summary["total_pretax_benefits"]
 
         net_take_home = gross - total_deductions - total_investments
         return {
@@ -516,6 +755,8 @@ def get_income_summary(month):
             "total_deductions": total_deductions,
             "total_investments": total_investments,
             "total_match": total_match,
+            "total_tax_withheld": total_tax_withheld,
+            "total_pretax_benefits": total_pretax_benefits,
             "net_take_home": net_take_home,
             "schedule": schedule_summary,
         }
@@ -558,8 +799,7 @@ def get_multi_year_trend(years):
 
 
 def get_savings_rate_series(year):
-    """
-    Savings Rate for each month of `year` = (money that went to a budget
+    """Savings Rate for each month of `year` = (money that went to a budget
     group literally named 'Savings') / (Net Take-Home that month). A month
     with no income logged is returned with savings_rate_pct = None rather
     than a misleading 0%, since the rate is undefined without a denominator.
@@ -587,6 +827,175 @@ def get_savings_rate_series(year):
     return results
 
 
+# =========================================================================
+# Federal income tax brackets, used only for the Report page's rough
+# "estimated tax owed" figure. Sourced from IRS Revenue Procedures via the
+# Tax Foundation's published tables:
+#   2026: Rev. Proc. 2025-32 (tax year 2026 - most recent available)
+#   2025: Rev. Proc. 2024-40, as amended by the OBBBA's standard-deduction
+#         increase (signed July 4, 2025)
+#   2024: Rev. Proc. 2023-34
+# Each entry is (bracket floor, marginal rate %) for taxable income, in
+# ascending order. Not tax advice - there's no way to know itemized
+# deductions, credits, non-W2 income, etc. from what this app tracks, so
+# this is a marginal-bracket estimate against the standard deduction only.
+# =========================================================================
+FEDERAL_TAX_BRACKETS = {
+    2026: {
+        "single": [(0, 10), (12400, 12), (50400, 22), (105700, 24), (201775, 32), (256225, 35), (640600, 37)],
+        "mfj":    [(0, 10), (24800, 12), (100800, 22), (211400, 24), (403550, 32), (512450, 35), (768700, 37)],
+        "hoh":    [(0, 10), (17700, 12), (67450, 22), (105700, 24), (201775, 32), (256200, 35), (640600, 37)],
+    },
+    2025: {
+        "single": [(0, 10), (11925, 12), (48475, 22), (103350, 24), (197300, 32), (250525, 35), (626350, 37)],
+        "mfj":    [(0, 10), (23850, 12), (96950, 22), (206700, 24), (394600, 32), (501050, 35), (751600, 37)],
+        "hoh":    [(0, 10), (17000, 12), (64850, 22), (103350, 24), (197300, 32), (250500, 35), (626350, 37)],
+    },
+    2024: {
+        "single": [(0, 10), (11600, 12), (47150, 22), (100525, 24), (191950, 32), (243725, 35), (609350, 37)],
+        "mfj":    [(0, 10), (23200, 12), (94300, 22), (201050, 24), (383900, 32), (487450, 35), (731200, 37)],
+        "hoh":    [(0, 10), (16550, 12), (63100, 22), (100500, 24), (191950, 32), (243700, 35), (609350, 37)],
+    },
+}
+
+STANDARD_DEDUCTION = {
+    2026: {"single": 16100, "mfj": 32200, "hoh": 24150},
+    2025: {"single": 15750, "mfj": 31500, "hoh": 23625},
+    2024: {"single": 14600, "mfj": 29200, "hoh": 21900},
+}
+
+FILING_STATUS_LABELS = {"single": "Single", "mfj": "Married Filing Jointly", "hoh": "Head of Household"}
+
+
+def _closest_supported_tax_year(year):
+    years = sorted(FEDERAL_TAX_BRACKETS.keys())
+    if year in FEDERAL_TAX_BRACKETS:
+        return year
+    return min(years, key=lambda y: abs(y - year))
+
+
+def estimate_federal_tax(taxable_income, year, filing_status="single"):
+    """Marginal-bracket estimate of federal income tax owed on `taxable_income`
+    for the given calendar year and filing status. Falls back to the
+    nearest year we have brackets for if `year` isn't covered (flagged via
+    `bracket_year` in the return value so the frontend can note it).
+    """
+    filing_status = filing_status if filing_status in FEDERAL_TAX_BRACKETS[2026] else "single"
+    bracket_year = _closest_supported_tax_year(int(year))
+    brackets = FEDERAL_TAX_BRACKETS[bracket_year][filing_status]
+    taxable_income = max(0.0, taxable_income)
+
+    tax = 0.0
+    breakdown = []
+    for i, (floor, rate) in enumerate(brackets):
+        if taxable_income <= floor:
+            break
+        ceiling = brackets[i + 1][0] if i + 1 < len(brackets) else None
+        top_of_slice = min(taxable_income, ceiling) if ceiling is not None else taxable_income
+        amount_in_bracket = max(0.0, top_of_slice - floor)
+        tax_in_bracket = amount_in_bracket * rate / 100
+        tax += tax_in_bracket
+        if amount_in_bracket > 0:
+            breakdown.append({
+                "rate": rate, "floor": floor, "ceiling": ceiling,
+                "amount_taxed": round(amount_in_bracket, 2), "tax": round(tax_in_bracket, 2),
+            })
+
+    marginal_rate = breakdown[-1]["rate"] if breakdown else brackets[0][1]
+    return {
+        "bracket_year": bracket_year,
+        "filing_status": filing_status,
+        "filing_status_label": FILING_STATUS_LABELS[filing_status],
+        "taxable_income": round(taxable_income, 2),
+        "tax": round(tax, 2),
+        "marginal_rate": marginal_rate,
+        "effective_rate": round((tax / taxable_income) * 100, 2) if taxable_income > 0 else 0,
+        "breakdown": breakdown,
+    }
+
+
+def get_year_end_tax_summary(year, filing_status="single"):
+    """A year-end tax-prep summary: gross pay, pre-tax deductions, pre-tax
+    investments, employer match, tax withheld, and an estimated federal
+    tax liability (marginal-bracket estimate against the standard
+    deduction), totaled for the whole year and broken down per income
+    source (each pay schedule/job, plus any manually-logged income grouped
+    together) so a multi-job year still reads sensibly rather than as one
+    blended number.
+
+    Returns None if there was no income at all logged for the year.
+    """
+    year = int(year)
+    totals = {
+        "gross": 0.0, "total_deductions": 0.0, "total_investments": 0.0, "total_match": 0.0,
+        "total_tax_withheld": 0.0, "total_pretax_benefits": 0.0, "net_take_home": 0.0,
+    }
+    by_source = {}
+
+    def bucket(key, label):
+        return by_source.setdefault(key, {
+            "label": label, "gross": 0.0, "total_deductions": 0.0,
+            "total_investments": 0.0, "total_match": 0.0,
+            "total_tax_withheld": 0.0, "total_pretax_benefits": 0.0,
+        })
+
+    for m in range(1, 13):
+        month = f"{year}-{m:02d}"
+        income = get_income_summary(month)
+        totals["gross"] += income["gross"]
+        totals["total_deductions"] += income["total_deductions"]
+        totals["total_investments"] += income["total_investments"]
+        totals["total_match"] += income["total_match"]
+        totals["total_tax_withheld"] += income["total_tax_withheld"]
+        totals["total_pretax_benefits"] += income["total_pretax_benefits"]
+        totals["net_take_home"] += income["net_take_home"]
+
+        for s in (income["schedule"] or {}).get("schedules", []):
+            b = bucket(f"schedule_{s['id']}", s["name"])
+            b["gross"] += s["gross"]
+            b["total_deductions"] += s["total_deductions"]
+            b["total_investments"] += s["total_investments"]
+            b["total_match"] += s["total_match"]
+            b["total_tax_withheld"] += s["total_tax_withheld"]
+            b["total_pretax_benefits"] += s["total_pretax_benefits"]
+
+        for row in income["income"]:
+            b = bucket("manual", "Other Income")
+            b["gross"] += row["gross_amount"]
+            b["total_deductions"] += sum(d["amount"] for d in row["deductions"])
+            b["total_investments"] += sum(i["amount"] for i in row["investments"] if not i["is_match"])
+            b["total_match"] += sum(i["amount"] for i in row["investments"] if i["is_match"])
+            b["total_tax_withheld"] += sum(d["amount"] for d in row["deductions"] if _classify_deduction(d["name"]) == "tax_withholding")
+            b["total_pretax_benefits"] += sum(d["amount"] for d in row["deductions"] if _classify_deduction(d["name"]) == "pretax_benefit")
+
+    if totals["gross"] <= 0:
+        return None
+
+    sources = sorted(by_source.values(), key=lambda b: -b["gross"])
+    for s in sources:
+        s["net"] = s["gross"] - s["total_deductions"] - s["total_investments"]
+        for k in ("gross", "total_deductions", "total_investments", "total_match", "total_tax_withheld", "total_pretax_benefits", "net"):
+            s[k] = round(s[k], 2)
+
+    for k in totals:
+        totals[k] = round(totals[k], 2)
+
+    # Rough taxable-income estimate: gross pay, minus pre-tax retirement/HSA
+    # investments, minus deductions classified as pre-tax benefits (health
+    # insurance, etc.), minus the standard deduction for the filing status.
+    # Ignores itemizing, credits, non-W2 income, and anything the app has
+    # no way to know about - see estimate_federal_tax()'s docstring.
+    bracket_year = _closest_supported_tax_year(year)
+    standard_deduction = STANDARD_DEDUCTION[bracket_year][filing_status if filing_status in STANDARD_DEDUCTION[bracket_year] else "single"]
+    taxable_income = totals["gross"] - totals["total_investments"] - totals["total_pretax_benefits"] - standard_deduction
+    estimate = estimate_federal_tax(taxable_income, year, filing_status)
+    estimate["standard_deduction"] = standard_deduction
+    estimate["amount_withheld"] = totals["total_tax_withheld"]
+    estimate["estimated_balance"] = round(totals["total_tax_withheld"] - estimate["tax"], 2)  # positive = refund, negative = owed
+
+    return {"year": year, "sources": sources, "totals": totals, "estimate": estimate}
+
+
 def get_annual_trend(year):
     """Monthly spend total per group across a calendar year."""
     with get_conn() as conn:
@@ -607,32 +1016,77 @@ def get_annual_trend(year):
 
 
 def get_budget_flow(month):
-    """
-    Nodes + links for the zero-based budget Sankey diagram:
+    """Nodes + links for the zero-based budget Sankey diagram:
     Gross Pay -> {Taxes & Deductions, Pre-Tax Investments, Net Take-Home}
     Employer Match -> Pre-Tax Investments (shown as its own income source,
       since it never passes through Gross Pay and isn't subtracted from
       Net Take-Home, but it does land in the same investments pool).
     Net Take-Home -> {each budget group, Unbudgeted remainder}
+
+    When more than one pay schedule actually contributed pay this month
+    (two jobs at once, or a job change that straddles the month), each
+    schedule gets its own income-source node instead of being folded into
+    one blended "Gross Pay" node -- so it's visible at a glance how much
+    of this month's money came from which job. Any manually-logged income
+    rows (not tied to a pay schedule) are grouped into their own "Other
+    Income" node alongside them in that case. With 0 or 1 active schedule
+    this collapses back to the original single "Gross Pay" node.
     """
     income = get_income_summary(month)
     groups = get_monthly_spending_report(month)
+    schedules = (income["schedule"] or {}).get("schedules", [])
 
-    nodes = [
-        {"id": "gross", "label": "Gross Pay", "column": 0},
+    nodes = []
+    links = []
+
+    if len(schedules) > 1:
+        for s in schedules:
+            node_id = f"gross_schedule_{s['id']}"
+            nodes.append({"id": node_id, "label": s["name"], "column": 0})
+            if s["total_deductions"] > 0.01:
+                links.append({"source": node_id, "target": "deductions", "value": s["total_deductions"]})
+            if s["total_investments"] > 0.01:
+                links.append({"source": node_id, "target": "investments", "value": s["total_investments"]})
+            schedule_net = s["gross"] - s["total_deductions"] - s["total_investments"]
+            if schedule_net > 0.01:
+                links.append({"source": node_id, "target": "net", "value": schedule_net})
+            if s["total_match"] > 0.01:
+                match_id = f"match_schedule_{s['id']}"
+                nodes.append({"id": match_id, "label": f"{s['name']} Match", "column": 0})
+                links.append({"source": match_id, "target": "investments", "value": s["total_match"]})
+
+        manual_gross = sum(r["gross_amount"] for r in income["income"])
+        if manual_gross > 0.01:
+            manual_deductions = sum(d["amount"] for r in income["income"] for d in r["deductions"])
+            manual_investments = sum(i["amount"] for r in income["income"] for i in r["investments"] if not i["is_match"])
+            manual_match = sum(i["amount"] for r in income["income"] for i in r["investments"] if i["is_match"])
+
+            nodes.append({"id": "gross_manual", "label": "Other Income", "column": 0})
+            if manual_deductions > 0.01:
+                links.append({"source": "gross_manual", "target": "deductions", "value": manual_deductions})
+            if manual_investments > 0.01:
+                links.append({"source": "gross_manual", "target": "investments", "value": manual_investments})
+            manual_net = manual_gross - manual_deductions - manual_investments
+            if manual_net > 0.01:
+                links.append({"source": "gross_manual", "target": "net", "value": manual_net})
+            if manual_match > 0.01:
+                nodes.append({"id": "match_manual", "label": "Other Income Match", "column": 0})
+                links.append({"source": "match_manual", "target": "investments", "value": manual_match})
+    else:
+        nodes.append({"id": "gross", "label": "Gross Pay", "column": 0})
+        links.append({"source": "gross", "target": "deductions", "value": income["total_deductions"]})
+        links.append({"source": "gross", "target": "investments", "value": income["total_investments"]})
+        links.append({"source": "gross", "target": "net", "value": income["net_take_home"]})
+
+        if income["total_match"] > 0.01:
+            nodes.append({"id": "match", "label": "Employer Match", "column": 0})
+            links.append({"source": "match", "target": "investments", "value": income["total_match"]})
+
+    nodes.extend([
         {"id": "deductions", "label": "Taxes & Deductions", "column": 1},
         {"id": "investments", "label": "Pre-Tax Investments", "column": 1},
         {"id": "net", "label": "Net Take-Home", "column": 1},
-    ]
-    links = [
-        {"source": "gross", "target": "deductions", "value": income["total_deductions"]},
-        {"source": "gross", "target": "investments", "value": income["total_investments"]},
-        {"source": "gross", "target": "net", "value": income["net_take_home"]},
-    ]
-
-    if income["total_match"] > 0.01:
-        nodes.append({"id": "match", "label": "Employer Match", "column": 0})
-        links.append({"source": "match", "target": "investments", "value": income["total_match"]})
+    ])
 
     assigned = 0.0
     for g in groups:
@@ -652,8 +1106,7 @@ def get_budget_flow(month):
 
 
 def _xirr(cash_flows):
-    """
-    cash_flows: list of (datetime, amount) tuples -- negative for money
+    """cash_flows: list of (datetime, amount) tuples -- negative for money
     going into the account (a contribution), positive for the terminal
     value being pulled back out (the account's current worth). Returns the
     annualized rate as a float (0.084 == 8.4%/yr), or None if it can't be
@@ -698,8 +1151,7 @@ def _xirr(cash_flows):
 
 
 def _compute_account_return_metrics(account):
-    """
-    Three "how well is this account actually doing" numbers, cheapest to
+    """Three "how well is this account actually doing" numbers, cheapest to
     most rigorous:
       - simple_return_pct: (current value - total contributed) / total
         contributed. Ignores timing entirely.
@@ -757,8 +1209,7 @@ def _compute_account_return_metrics(account):
 
 
 def _twrr_subperiod_returns(contributions, valuations):
-    """
-    Splits an account's history into sub-periods bounded by consecutive
+    """Splits an account's history into sub-periods bounded by consecutive
     valuations, and computes the return of each sub-period with
     contributions backed out -- the standard building block behind
     Time-Weighted Rate of Return. Any contributions that landed inside a
@@ -792,8 +1243,7 @@ def _twrr_subperiod_returns(contributions, valuations):
 
 
 def _compute_risk_metrics(account):
-    """
-    Four risk/performance numbers built on top of the same sub-period
+    """Four risk/performance numbers built on top of the same sub-period
     return series:
       - twrr_pct: Time-Weighted Rate of Return, annualized. Unlike XIRR,
         this is deliberately blind to *how much* was contributed each
@@ -901,9 +1351,214 @@ def _compute_risk_metrics(account):
     }
 
 
-def get_net_worth_history():
+# ---------------------------------------------------------------------------
+# Investment Insights - plain-language "is this actually a good investment,
+# or does it just look like one" flags, built on top of the same metrics
+# dict _compute_account_return_metrics()/_compute_risk_metrics() already
+# produce. Thresholds are banded by a per-account `risk_profile` (Low /
+# Medium / High tolerance) rather than one fixed number for every account,
+# since a 25% drawdown is unremarkable for a growth account and alarming
+# for a cash-like one.
+# ---------------------------------------------------------------------------
+RISK_PROFILES = ("conservative", "moderate", "aggressive")
+
+RISK_PROFILE_THRESHOLDS = {
+    # vol_high / dd_concerning: annualized volatility / max drawdown (in
+    # percentage points, e.g. 25.0 == 25%) past which the ride is "a lot"
+    # for that risk profile.
+    # calmar_poor / calmar_excellent: CAGR / |Max DD| bands.
+    # timing_gap_notable: |XIRR - TWRR| gap (percentage points) worth flagging.
+    "conservative": {"vol_high": 12.0, "dd_concerning": 15.0, "calmar_poor": 0.5, "calmar_excellent": 1.5, "timing_gap_notable": 2.0},
+    "moderate":     {"vol_high": 20.0, "dd_concerning": 25.0, "calmar_poor": 0.4, "calmar_excellent": 1.2, "timing_gap_notable": 3.0},
+    "aggressive":   {"vol_high": 35.0, "dd_concerning": 45.0, "calmar_poor": 0.33, "calmar_excellent": 1.0, "timing_gap_notable": 5.0},
+}
+
+_INSIGHT_SEVERITY_ORDER = {"warning": 0, "good": 1, "neutral": 2}
+
+
+def generate_investment_insights(metrics, risk_profile="moderate"):
+    """Evaluates one merged metrics dict (return metrics + risk metrics, the
+    same shape stored on acc["metrics"]) and returns a list of:
+        {"severity": "good" | "warning" | "neutral", "code": str, "label": str, "detail": str}
+    ordered warnings-first. `code` is a stable identifier so a renderer can
+    style each insight type consistently without string-matching `label`.
     """
-    For every account, returns contribution running-total and the latest
+    if not metrics:
+        return []
+    t = RISK_PROFILE_THRESHOLDS.get(risk_profile, RISK_PROFILE_THRESHOLDS["moderate"])
+    insights = []
+
+    cagr = metrics.get("cagr_pct")
+    xirr = metrics.get("xirr_pct")
+    twrr = metrics.get("twrr_pct")
+    vol = metrics.get("annualized_volatility_pct")
+    max_dd = metrics.get("max_drawdown_pct")  # 0 or negative
+    recovery_days = metrics.get("recovery_days")
+    recovered = metrics.get("recovered")
+    periods = metrics.get("num_return_periods") or 0
+
+    if periods == 0:
+        # No valuation-to-valuation sub-period exists yet at all (fewer
+        # than 2 valuations logged), so none of the checks below have
+        # anything to work with.
+        insights.append({
+            "severity": "neutral", "code": "insufficient_history",
+            "label": "Limited history",
+            "detail": "Log at least one more valuation to unlock these insights for this account.",
+        })
+        return insights
+    if periods < 2:
+        # A single sub-period is enough for a timing (XIRR vs. TWRR) read,
+        # but not for volatility/drawdown, which need a return series.
+        insights.append({
+            "severity": "neutral", "code": "insufficient_history",
+            "label": "Limited history",
+            "detail": "Log one more valuation to unlock volatility and drawdown insights for this account.",
+        })
+
+    # 1. Timing fluke: XIRR vs. TWRR gap
+    if xirr is not None and twrr is not None:
+        gap = xirr - twrr
+        if gap > t["timing_gap_notable"]:
+            insights.append({
+                "severity": "good", "code": "timing_luck",
+                "label": "Favorable cash-flow timing",
+                "detail": f"Your deposit timing added about {gap:.1f} points above the asset's own performance (XIRR {xirr:+.1f}% vs. TWRR {twrr:+.1f}%). The asset itself isn't performing quite as well as your balance suggests.",
+            })
+        elif gap < -t["timing_gap_notable"]:
+            insights.append({
+                "severity": "warning", "code": "timing_drag",
+                "label": "Timing drag",
+                "detail": f"Poor deposit timing cost you about {abs(gap):.1f} points versus just holding the asset (TWRR {twrr:+.1f}% vs. XIRR {xirr:+.1f}%). The underlying investment is doing better than your own return.",
+            })
+
+    # 2. Calmar ratio: CAGR per unit of worst-case pain
+    if cagr is not None and cagr > 0 and max_dd is not None and max_dd < 0:
+        calmar = cagr / abs(max_dd)
+        if calmar >= t["calmar_excellent"]:
+            insights.append({
+                "severity": "good", "code": "calmar_excellent",
+                "label": "Strong risk-adjusted return",
+                "detail": f"A Calmar ratio of {calmar:.2f} means the annual return ({cagr:+.1f}%) comfortably outweighs the worst historical drawdown ({max_dd:.1f}%).",
+            })
+        elif calmar < t["calmar_poor"]:
+            insights.append({
+                "severity": "warning", "code": "calmar_poor",
+                "label": "Weak risk-adjusted return",
+                "detail": f"A Calmar ratio of {calmar:.2f} means you're enduring disproportionate drawdown ({max_dd:.1f}%) for the return this account delivers ({cagr:+.1f}%).",
+            })
+
+    # 3. The "Wild Ride" trap: strong return riding on extreme vol + deep DD
+    if (cagr is not None and cagr > 0 and vol is not None and max_dd is not None
+            and vol > t["vol_high"] and abs(max_dd) > t["dd_concerning"]):
+        insights.append({
+            "severity": "warning", "code": "wild_ride",
+            "label": "Return may be luck-driven",
+            "detail": f"The {cagr:+.1f}% return is riding on extreme volatility ({vol:.1f}%) and a deep drawdown ({max_dd:.1f}%) for this account's risk profile. This return pattern is unstable and could reverse.",
+        })
+
+    # 4. Consistently negative, but not a wild ride -- a poor fit, not bad luck
+    if cagr is not None and cagr <= 0 and (vol is None or vol <= t["vol_high"]):
+        insights.append({
+            "severity": "warning", "code": "steady_underperformer",
+            "label": "Consistent underperformance",
+            "detail": f"This account is losing money ({cagr:+.1f}% CAGR) without especially high volatility -- this looks like a genuinely weak asset fit rather than a rough patch.",
+        })
+
+    # 5. Resilience: drawdown depth vs. recovery time
+    if max_dd is not None and abs(max_dd) >= t["dd_concerning"]:
+        if recovered is False or (recovery_days is not None and recovery_days > 730):
+            days_note = f"{recovery_days} days" if recovery_days is not None else "still ongoing"
+            insights.append({
+                "severity": "warning", "code": "low_resilience",
+                "label": "Slow to recover",
+                "detail": f"A {max_dd:.1f}% drawdown has taken a long time to recover from ({days_note}). Consider whether you're comfortable seeing this account underwater for that long.",
+            })
+        elif recovered and recovery_days is not None and recovery_days < 180:
+            insights.append({
+                "severity": "good", "code": "high_resilience",
+                "label": "Bounces back quickly",
+                "detail": f"Despite a steep {max_dd:.1f}% drawdown, this account historically recovered in about {recovery_days} days.",
+            })
+
+    insights.sort(key=lambda i: _INSIGHT_SEVERITY_ORDER.get(i["severity"], 3))
+    return insights
+
+
+def _account_value_at(account, date):
+    """Value of one account as of `date`: latest valuation on/before it, or
+    the running contribution total if no valuation has been logged yet.
+    Mirrors accountValueAt() in main.js, used there for the same
+    carry-forward logic when charting."""
+    applicable = [v for v in account.get("valuations", []) if v["date"] <= date]
+    if applicable:
+        return sorted(applicable, key=lambda v: v["date"])[-1]["value"]
+    return sum(c["amount"] for c in account.get("contributions", []) if c["date"] <= date)
+
+
+def _build_portfolio_series(accounts):
+    """Pools every account into one synthetic "portfolio account" -- a single
+    valuation series (portfolio value on every date any account has a
+    valuation, each account's contribution carried forward via
+    _account_value_at) and a single flat contributions list. Feeding this
+    into the same _compute_account_return_metrics()/_compute_risk_metrics()
+    used per-account gives a true blended growth-of-$1 for the whole
+    portfolio -- correctly reflecting that accounts moving differently from
+    each other can lower overall volatility and drawdown -- rather than a
+    weighted average of each account's separately-computed metrics, which
+    would miss that diversification effect entirely.
+    """
+    all_dates = set()
+    for acc in accounts:
+        for v in acc.get("valuations", []):
+            all_dates.add(v["date"])
+    if not all_dates:
+        return [], []
+
+    dates = sorted(all_dates)
+    pooled_valuations = [
+        {"date": d, "value": sum(_account_value_at(acc, d) for acc in accounts)}
+        for d in dates
+    ]
+    pooled_contributions = [
+        {"date": c["date"], "amount": c["amount"]}
+        for acc in accounts for c in acc.get("contributions", [])
+    ]
+    return pooled_contributions, pooled_valuations
+
+
+def compute_portfolio_metrics(accounts, risk_profile="moderate"):
+    """Return + risk metrics (and insights) for the whole portfolio blended
+    together, using the same growth-of-$1 machinery as a single account.
+    Returns None if there's no valuation history anywhere yet."""
+    contributions, valuations = _build_portfolio_series(accounts)
+    if not valuations:
+        return None
+
+    pooled = {"contributions": contributions, "valuations": valuations}
+    metrics = _compute_account_return_metrics(pooled)
+    risk_metrics = _compute_risk_metrics(pooled)
+    if risk_metrics:
+        metrics = metrics or {}
+        metrics.update(risk_metrics)
+    if not metrics:
+        return None
+
+    metrics["insights"] = generate_investment_insights(metrics, risk_profile)
+    return metrics
+
+
+def get_portfolio_metrics():
+    """Convenience wrapper: loads every account fresh from the DB and
+    blends them into portfolio-level metrics, using the saved
+    'portfolio_risk_profile' app setting (defaults to 'moderate')."""
+    accounts = get_net_worth_history()
+    risk_profile = get_setting("portfolio_risk_profile") or "moderate"
+    return compute_portfolio_metrics(accounts, risk_profile)
+
+
+def get_net_worth_history():
+    """For every account, returns contribution running-total and the latest
     valuation per date, so the frontend can chart 'money in' vs 'market value'.
     """
     with get_conn() as conn:
@@ -926,11 +1581,12 @@ def get_net_worth_history():
                 metrics = metrics or {}
                 metrics.update(risk_metrics)
             acc["metrics"] = metrics
+            acc["insights"] = generate_investment_insights(metrics, acc.get("risk_profile") or "moderate")
         return accounts
 
 
 # ---------------------------------------------------------------------------
-# Budget Presets — save the current month's Groups + Line Items + planned
+# Budget Presets - save the current month's Groups + Line Items + planned
 # amounts as a reusable named template, and apply it to any month later.
 # ---------------------------------------------------------------------------
 def get_budget_presets():
@@ -977,10 +1633,9 @@ def delete_budget_preset(preset_id):
 
 
 def apply_budget_preset(preset_id, month):
-    """
-    Applies a saved preset to `month`: clears that month's existing line
+    """Applies a saved preset to `month`: clears that month's existing line
     items (so re-applying a preset gives a clean slate rather than piling
-    up duplicates), then recreates each preset item — reusing any existing
+    up duplicates), then recreates each preset item - reusing any existing
     group with a matching name, or creating a new group if needed.
     Returns the number of line items created. Raises ValueError if the
     preset doesn't exist or has no items.
@@ -1023,7 +1678,7 @@ def apply_budget_preset(preset_id, month):
 
 
 # ---------------------------------------------------------------------------
-# App settings — small generic key/value store. Currently just holds the
+# App settings - small generic key/value store. Currently just holds the
 # selected color theme, but kept generic for any future simple preference.
 # ---------------------------------------------------------------------------
 def get_setting(key, default=None):
@@ -1123,9 +1778,87 @@ def _lookup_mapping(conn, category, subcategory, merchant):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Automate tab -- manual, user-authored "if this text appears anywhere in
+# the description, categorize it as..." rules. Distinct from import_mappings
+# above: that table is auto-learned from an exact match on a bank export's
+# Category/Sub-category/Merchant columns, whereas these are deliberately
+# created substring rules against the free-text description itself, so a
+# merchant like "CHICK-FIL-A #04821" still matches a rule for "CHICK-FIL-A"
+# even when the exact merchant string varies transaction to transaction.
+# ---------------------------------------------------------------------------
+def get_description_rules():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM description_rules ORDER BY LENGTH(pattern) DESC, created_at"
+        ).fetchall()
+        return rows_to_dicts(rows)
+
+
+def create_description_rule(pattern, group_name, item_name):
+    pattern = (pattern or "").strip()
+    if not pattern:
+        raise ValueError("Pattern can't be empty.")
+    return insert("description_rules", {
+        "pattern": pattern, "group_name": group_name, "item_name": item_name,
+    })
+
+
+def update_description_rule(rule_id, fields):
+    allowed = {k: v for k, v in fields.items() if k in ("pattern", "group_name", "item_name")}
+    if "pattern" in allowed:
+        allowed["pattern"] = (allowed["pattern"] or "").strip()
+        if not allowed["pattern"]:
+            raise ValueError("Pattern can't be empty.")
+    if not allowed:
+        return
+    update("description_rules", rule_id, allowed)
+
+
+def delete_description_rule(rule_id):
+    delete("description_rules", rule_id)
+
+
+def _lookup_description_rule(rules, description):
+    """Case-insensitive substring search across every rule's pattern
+    against one transaction's description text. `rules` is already sorted
+    longest-pattern-first (see get_description_rules) so a more specific
+    rule wins over a shorter, more general one when both would match."""
+    desc_lower = (description or "").lower()
+    if not desc_lower:
+        return None
+    for rule in rules:
+        if rule["pattern"].lower() in desc_lower:
+            return rule
+    return None
+
+
+def apply_description_rule_to_existing(rule_id, only_unassigned=True):
+    """Bulk-applies one rule to already-imported transactions whose
+    description contains its pattern -- used when a rule is first created,
+    so it doesn't only affect future imports. Returns how many rows changed."""
+    with get_conn() as conn:
+        rule = conn.execute("SELECT * FROM description_rules WHERE id = ?", (rule_id,)).fetchone()
+        if not rule:
+            return 0
+        pattern = rule["pattern"].lower()
+        query = "SELECT id, date, description FROM transactions WHERE LOWER(description) LIKE ?"
+        params = [f"%{pattern}%"]
+        if only_unassigned:
+            query += " AND line_item_id IS NULL"
+        rows = conn.execute(query, params).fetchall()
+
+        updated = 0
+        for row in rows:
+            line_item_id = _find_or_create_line_item(conn, rule["group_name"], rule["item_name"], row["date"][:7])
+            conn.execute("UPDATE transactions SET line_item_id = ? WHERE id = ?", (line_item_id, row["id"]))
+            updated += 1
+        conn.commit()
+        return updated
+
+
 def import_account_csv(account_id, csv_text):
-    """
-    Imports contributions/valuations for one Net Worth Aggregator account.
+    """Imports contributions/valuations for one Net Worth Aggregator account.
     Expected columns: Date, Type, Amount -- Type is 'Contribution' or
     'Valuation' (case-insensitive). For a Contribution row, Amount is the
     amount deposited on that date; for a Valuation row, Amount (or a
@@ -1186,8 +1919,7 @@ def import_account_csv(account_id, csv_text):
 
 
 def import_transactions_csv(csv_text):
-    """
-    Parses a Truist-style transaction export and inserts each row as a
+    """Parses a Truist-style transaction export and inserts each row as a
     Daily Ledger transaction. Columns expected:
     Posted Date, Transaction Date, Transaction Type, Check/Serial #,
     Full description, Merchant name, Category name, Sub-category name,
@@ -1223,13 +1955,15 @@ def import_transactions_csv(csv_text):
     - Duplicate rows (matched by date + amount + description) are skipped
       in whichever of transactions/pending_credits they'd land in, so
       re-importing an overlapping date range is safe either way.
-    - A Line Item is auto-assigned when the row's Category/Sub-category/
-      Merchant matches a previously learned mapping; otherwise it's left
-      unassigned for manual review.
+    - A Line Item is auto-assigned first from any Automate rule whose
+      pattern appears anywhere in the row's description (see
+      description_rules / the Automate tab), then falls back to a
+      previously learned Category/Sub-category/Merchant mapping; otherwise
+      it's left unassigned for manual review.
     - Rows categorized "Transfers & Payments" are still imported (nothing
       is silently dropped) but counted separately, since money moving
       between your own accounts or a credit card bill payment usually
-      isn't "spending" you want counted in budget reports — the returned
+      isn't "spending" you want counted in budget reports - the returned
       `transfer_count` lets the UI flag them for optional bulk deletion.
     """
     reader = csv.DictReader(io.StringIO(csv_text))
@@ -1253,6 +1987,7 @@ def import_transactions_csv(csv_text):
     errors = []
 
     with get_conn() as conn:
+        description_rules = get_description_rules()
         for row_num, row in enumerate(reader, start=2):  # header is row 1
             try:
                 date_raw = row.get("Transaction Date") or row.get("Posted Date") or ""
@@ -1328,7 +2063,8 @@ def import_transactions_csv(csv_text):
                 if category.lower() == "transfers & payments":
                     transfer_count += 1
 
-                mapping = _lookup_mapping(conn, category, subcategory, merchant)
+                rule_match = _lookup_description_rule(description_rules, description)
+                mapping = rule_match or _lookup_mapping(conn, category, subcategory, merchant)
                 line_item_id = None
                 if mapping:
                     line_item_id = _find_or_create_line_item(
@@ -1399,8 +2135,7 @@ def _learn_mapping_from_transactions(conn, ids, line_item_id):
 
 def search_transactions(q=None, date_from=None, date_to=None, line_item_id=None,
                          tx_type=None, min_amount=None, max_amount=None, limit=500):
-    """
-    Cross-month transaction search -- the Daily Ledger tab only ever shows
+    """Cross-month transaction search -- the Daily Ledger tab only ever shows
     one Ledger Month at a time, so this is the escape hatch for "when did I
     buy that" / "show me everything from Amazon this year" style questions
     that span months.
@@ -1462,6 +2197,104 @@ def update_transaction(tx_id, fields):
         conn.commit()
 
 
+def split_transaction(tx_id, splits):
+    """Splits one transaction into multiple, one per {line_item_id, amount,
+    description} dict in `splits`. The original row is removed and
+    replaced by len(splits) new rows sharing a split_group_id (so they
+    can be shown together and undone as a unit), each carrying the
+    original's date and type.
+
+    The original's import_hash, if it had one (i.e. it came from a CSV
+    import), is preserved on the first new row only -- so a future
+    re-import of that same bank export row is still recognized as a
+    duplicate and skipped, rather than silently recreating the original
+    unsplit transaction alongside the split it was divided into.
+
+    Raises ValueError if there are fewer than 2 splits, any split amount
+    isn't positive, or the amounts don't sum to the original transaction's
+    amount (within a cent, to tolerate rounding).
+    """
+    if len(splits) < 2:
+        raise ValueError("A split needs at least 2 parts.")
+    if any(s.get("amount", 0) <= 0 for s in splits):
+        raise ValueError("Each split amount must be positive.")
+
+    with get_conn() as conn:
+        original = conn.execute("SELECT * FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+        if not original:
+            raise ValueError("Transaction not found.")
+        original = dict(original)
+
+        total = sum(s["amount"] for s in splits)
+        if abs(total - original["amount"]) > 0.01:
+            raise ValueError(
+                f"Split amounts total {total:.2f}, which doesn't match the original amount of {original['amount']:.2f}."
+            )
+
+        split_group_id = f"split_{tx_id}"
+        conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+
+        new_ids = []
+        for i, s in enumerate(splits):
+            cur = conn.execute(
+                """INSERT INTO transactions
+                   (line_item_id, date, description, amount, type, import_hash,
+                    import_category, import_subcategory, import_merchant, split_group_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    s.get("line_item_id"),
+                    original["date"],
+                    (s.get("description") or original["description"] or "").strip(),
+                    s["amount"],
+                    original["type"],
+                    original["import_hash"] if i == 0 else None,
+                    original["import_category"],
+                    original["import_subcategory"],
+                    original["import_merchant"],
+                    split_group_id,
+                ),
+            )
+            new_ids.append(cur.lastrowid)
+
+        for new_id, s in zip(new_ids, splits):
+            if s.get("line_item_id"):
+                _learn_mapping_from_transactions(conn, [new_id], s["line_item_id"])
+
+        conn.commit()
+
+    return {"split_group_id": split_group_id, "transaction_ids": new_ids}
+
+
+def unsplit_transaction(split_group_id):
+    """Merges every transaction sharing a split_group_id back into a
+    single transaction (their amounts summed). The merged row is left
+    unassigned (no Line Item) since undoing a split means the individual
+    per-part assignments no longer apply to the combined amount."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM transactions WHERE split_group_id = ? ORDER BY id", (split_group_id,)
+        ).fetchall()
+        if not rows:
+            raise ValueError("No split transactions found for that group.")
+        rows = [dict(r) for r in rows]
+        total = sum(r["amount"] for r in rows)
+        first = rows[0]
+
+        conn.execute("DELETE FROM transactions WHERE split_group_id = ?", (split_group_id,))
+        cur = conn.execute(
+            """INSERT INTO transactions
+               (line_item_id, date, description, amount, type, import_hash,
+                import_category, import_subcategory, import_merchant, split_group_id)
+               VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+            (
+                first["date"], first["description"], total, first["type"],
+                first["import_hash"], first["import_category"], first["import_subcategory"], first["import_merchant"],
+            ),
+        )
+        conn.commit()
+        return {"transaction_id": cur.lastrowid}
+
+
 def bulk_update_transaction_line_item(ids, line_item_id):
     """Reassigns the Line Item on multiple transactions in one action and
     teaches the mapping system from the batch."""
@@ -1476,7 +2309,7 @@ def bulk_update_transaction_line_item(ids, line_item_id):
 
 
 def bulk_delete_transactions(ids):
-    """Deletes multiple transactions at once — handy for clearing out
+    """Deletes multiple transactions at once - handy for clearing out
     imported rows that turn out to be internal transfers rather than
     real spending."""
     with get_conn() as conn:
@@ -1486,7 +2319,7 @@ def bulk_delete_transactions(ids):
 
 
 # ---------------------------------------------------------------------------
-# Pending Credits — "Credit"-type CSV import rows (Zelle received, refunds,
+# Pending Credits - "Credit"-type CSV import rows (Zelle received, refunds,
 # reimbursements, etc.) that aren't auto-logged as Daily Ledger transactions,
 # since they're often a deliberate deposit toward a Sinking Fund / Goal
 # rather than ordinary income. They sit here until the person routes each
@@ -1563,7 +2396,7 @@ def dismiss_pending_credit(pending_id):
 
 
 # ---------------------------------------------------------------------------
-# Debt Payoff Tracker — mirror image of the Net Worth Aggregator: balances
+# Debt Payoff Tracker - mirror image of the Net Worth Aggregator: balances
 # go down instead of up, driven by an interest formula instead of manual
 # valuations. Covers both standard amortizing loans (mortgage, auto,
 # student, personal) and revolving debt (credit cards).
@@ -1580,8 +2413,7 @@ def get_debts():
 
 
 def add_debt_payment(debt_id, pay_date, amount):
-    """
-    Logs one payment and automatically splits it into interest/principal
+    """Logs one payment and automatically splits it into interest/principal
     based on the debt's current balance and APR (same math a real loan
     servicer uses), then reduces current_balance by the principal portion --
     so unlike Net Worth accounts, you don't separately "update the value";
@@ -1624,8 +2456,7 @@ def _add_months(d, months):
 
 
 def _amortization_schedule(balance, apr, payment, max_months=600):
-    """
-    Simulates paying down `balance` at `apr`% APR with a fixed monthly
+    """Simulates paying down `balance` at `apr`% APR with a fixed monthly
     `payment` (works for both a standard installment loan and a revolving
     balance paid at a fixed amount each month). Returns a list of
     {month, interest, principal, balance} rows, stopping when the balance
@@ -1679,8 +2510,7 @@ def get_debt_summary(debt_id):
 
 
 def get_debt_payoff_plan(strategy="avalanche", extra_monthly=0.0, max_months=600):
-    """
-    Simulates paying off every debt in parallel: each keeps getting its own
+    """Simulates paying off every debt in parallel: each keeps getting its own
     minimum payment every month, and `extra_monthly` is funneled entirely
     into ONE target debt at a time, chosen by `strategy`:
       - "avalanche": highest APR first (minimizes total interest paid)
@@ -1745,7 +2575,7 @@ def get_debt_payoff_plan(strategy="avalanche", extra_monthly=0.0, max_months=600
 
 
 # ---------------------------------------------------------------------------
-# Full-database Excel backup / restore — one sheet per table, covering
+# Full-database Excel backup / restore - one sheet per table, covering
 # essentially every piece of user data across all three pages (Budget,
 # Track, Report). BACKUP_TABLES order matters: parents before children for
 # insert-on-restore, since every child table's foreign key needs its
@@ -1761,23 +2591,24 @@ BACKUP_TABLES = [
     ("Income", "income", ["id", "month", "source", "gross_amount", "pay_date"]),
     ("Income Deductions", "deductions", ["id", "income_id", "name", "amount"]),
     ("Income Investments", "investments", ["id", "income_id", "name", "amount", "is_match"]),
-    ("Pay Schedule", "pay_schedule", ["id", "annual_income", "anchor_date", "payments_per_year", "start_date", "end_date"]),
-    ("Pay Schedule Deductions", "pay_schedule_deductions", ["id", "name", "amount"]),
-    ("Pay Schedule Investments", "pay_schedule_investments", ["id", "name", "amount", "is_match"]),
+    ("Pay Schedule", "pay_schedule", ["id", "name", "annual_income", "anchor_date", "payments_per_year", "start_date", "end_date"]),
+    ("Pay Schedule Deductions", "pay_schedule_deductions", ["id", "pay_schedule_id", "name", "amount"]),
+    ("Pay Schedule Investments", "pay_schedule_investments", ["id", "pay_schedule_id", "name", "amount", "is_match"]),
     ("Transactions", "transactions", ["id", "line_item_id", "date", "description", "amount", "type", "import_hash", "import_category", "import_subcategory", "import_merchant"]),
     ("Pending Credits", "pending_credits", ["id", "date", "description", "amount", "merchant", "category", "subcategory", "import_hash", "resolved", "resolution"]),
     ("Sinking Funds", "sinking_funds", ["id", "name", "target_amount", "target_date"]),
     ("Fund Contributions", "sinking_fund_contributions", ["id", "fund_id", "date", "amount"]),
-    ("Accounts", "accounts", ["id", "name", "account_type"]),
+    ("Accounts", "accounts", ["id", "name", "account_type", "risk_profile"]),
     ("Account Contributions", "contributions", ["id", "account_id", "date", "amount", "import_hash"]),
     ("Account Valuations", "valuations", ["id", "account_id", "date", "value", "import_hash"]),
     ("Debts", "debts", ["id", "name", "debt_type", "is_revolving", "current_balance", "apr", "minimum_payment", "original_principal", "original_term_months", "start_date", "escrow_amount"]),
     ("Debt Payments", "debt_payments", ["id", "debt_id", "date", "amount", "principal", "interest"]),
     ("Import Mappings", "import_mappings", ["id", "match_key", "group_name", "item_name"]),
+    ("Automate Rules", "description_rules", ["id", "pattern", "group_name", "item_name", "created_at"]),
     ("App Settings", "app_settings", ["key", "value"]),
 ]
 
-# Human-readable column headers for the exported sheets — presentation
+# Human-readable column headers for the exported sheets - presentation
 # only; import maps these back to the raw column name via BACKUP_TABLES.
 _COLUMN_LABELS = {
     "id": "ID", "name": "Name", "sort_order": "Sort Order", "group_id": "Group ID",
@@ -1785,6 +2616,7 @@ _COLUMN_LABELS = {
     "group_name": "Group Name", "item_name": "Item Name", "source": "Source",
     "gross_amount": "Gross Amount", "pay_date": "Pay Date", "income_id": "Income ID",
     "amount": "Amount", "is_match": "Is Employer Match", "annual_income": "Annual Income",
+    "pay_schedule_id": "Pay Schedule ID",
     "anchor_date": "Anchor Pay Date", "payments_per_year": "Payments Per Year",
     "start_date": "Start Date", "end_date": "End Date", "line_item_id": "Line Item ID",
     "date": "Date", "description": "Description", "type": "Type",
@@ -1792,18 +2624,17 @@ _COLUMN_LABELS = {
     "import_subcategory": "Import Subcategory", "import_merchant": "Import Merchant",
     "merchant": "Merchant", "category": "Category", "subcategory": "Subcategory",
     "resolved": "Resolved", "resolution": "Resolution", "fund_id": "Fund ID",
-    "account_id": "Account ID", "account_type": "Account Type", "value": "Value",
+    "account_id": "Account ID", "account_type": "Account Type", "risk_profile": "Risk Profile", "value": "Value",
     "debt_id": "Debt ID", "debt_type": "Debt Type", "is_revolving": "Is Revolving",
     "current_balance": "Current Balance", "apr": "APR %", "minimum_payment": "Minimum Payment",
     "original_principal": "Original Principal", "original_term_months": "Original Term (Months)",
     "escrow_amount": "Escrow Amount", "principal": "Principal", "interest": "Interest",
-    "match_key": "Match Key", "key": "Key",
+    "match_key": "Match Key", "key": "Key", "pattern": "Pattern", "created_at": "Created At",
 }
 
 
 def get_full_backup_data():
-    """
-    Returns [(sheet_name, [headers], [[row values], ...]), ...] covering
+    """Returns [(sheet_name, [headers], [[row values], ...]), ...] covering
     every table in BACKUP_TABLES. api.py turns this into an actual multi-
     sheet .xlsx via pandas.
     """
@@ -1818,12 +2649,11 @@ def get_full_backup_data():
 
 
 def import_full_backup_data(sheets):
-    """
-    Restores the database from a full backup produced by
+    """Restores the database from a full backup produced by
     get_full_backup_data() and round-tripped through Excel. This is a
     DESTRUCTIVE full replace: every sheet name in `sheets` that matches a
     known table has that table's existing rows cleared and replaced with
-    exactly what's in the sheet — primary keys included, so every other
+    exactly what's in the sheet - primary keys included, so every other
     table's foreign keys stay pointing at the right row. Any sheet/table
     not present in the upload is left completely untouched.
 
@@ -1834,7 +2664,7 @@ def import_full_backup_data(sheets):
     known = {name: (table, columns) for name, table, columns in BACKUP_TABLES}
     matched = [(name, known[name][0], known[name][1]) for name in sheets if name in known]
     if not matched:
-        raise ValueError("No recognized sheets found in this file — is it a backup exported from this app?")
+        raise ValueError("No recognized sheets found in this file - is it a backup exported from this app?")
 
     conn = sqlite3.connect(DB_PATH)
     try:

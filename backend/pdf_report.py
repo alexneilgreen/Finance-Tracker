@@ -17,6 +17,7 @@ so the PDF page matches what's on screen in the app.
 import io
 import calendar
 import textwrap
+from datetime import datetime
 
 import numpy as np
 import matplotlib
@@ -29,7 +30,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from backend import db_manager as db
 
 # ---------------------------------------------------------------------------
-# Print-friendly palette — light background, legible on paper, echoing the
+# Print-friendly palette - light background, legible on paper, echoing the
 # app's ink/brass ledger theme without dumping ink across a whole printed page.
 # ---------------------------------------------------------------------------
 PALETTE = ["#B08D3E", "#4C7A63", "#4C6E8C", "#A14B36", "#7C6592", "#3F8C8F", "#A9822E", "#5D7086"]
@@ -105,6 +106,114 @@ def _style_axes(ax):
     ax.tick_params(colors=TEXT_MUTED, labelsize=7)
     for spine in ax.spines.values():
         spine.set_color(GRID)
+
+
+def _draw_page_chrome(fig, year, kicker, page_num, total_pages):
+    """Small-caps section label above the title, plus a running footer --
+    applied to every page after the cover/TOC so the whole document reads
+    as one designed report instead of a stack of independently-built
+    pages. `kicker` may be None (used for the TOC, which still gets a
+    footer but no section label)."""
+    if kicker:
+        fig.text(0.5, 0.995, kicker.upper(), fontsize=7, color=PALETTE[0], ha="center", va="top",
+                  family="sans-serif", weight="bold")
+    fig.text(0.06, 0.015, f"Personal Finance Annual Report - {year}", fontsize=7.5, color=TEXT_MUTED, ha="left", va="bottom")
+    fig.text(0.94, 0.015, f"Page {page_num} of {total_pages}", fontsize=7.5, color=TEXT_MUTED, ha="right", va="bottom")
+
+
+def _compute_year_in_review_stats(year, accounts):
+    """Headline year-in-review numbers for the cover page -- computed from
+    the same data sources (and the same _year_dates/_account_value_at
+    carry-forward logic) the Annual Summary charts already use, so the
+    cover's numbers always agree with the charts later in the document."""
+    dates = _year_dates(accounts, year)
+    year_start, year_end = f"{year}-01-01", f"{year}-12-31"
+
+    if dates:
+        start_net_worth = sum(_account_value_at(a, dates[0]) for a in accounts)
+        end_net_worth = sum(_account_value_at(a, dates[-1]) for a in accounts)
+        net_worth_change = end_net_worth - start_net_worth
+    else:
+        end_net_worth = net_worth_change = None
+
+    total_contributed = sum(
+        c["amount"] for a in accounts for c in a["contributions"]
+        if year_start <= c["date"] <= year_end
+    )
+
+    savings_rows = db.get_savings_rate_series(year)
+    rates = [r["savings_rate_pct"] for r in savings_rows if r["savings_rate_pct"] is not None]
+    avg_savings_rate = sum(rates) / len(rates) if rates else None
+
+    return {
+        "end_net_worth": end_net_worth,
+        "net_worth_change": net_worth_change,
+        "total_contributed": total_contributed,
+        "avg_savings_rate": avg_savings_rate,
+    }
+
+
+def _build_cover_page(pdf, year, stats, generated_on):
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.patch.set_facecolor("white")
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis("off")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    ax.axhline(0.80, color=PALETTE[0], linewidth=1.2, xmin=0.1, xmax=0.9)
+    ax.axhline(0.28, color=PALETTE[0], linewidth=1.2, xmin=0.1, xmax=0.9)
+
+    ax.text(0.5, 0.71, "Personal Finance", fontsize=15, color=TEXT_MUTED, family="serif", ha="center")
+    ax.text(0.5, 0.65, "Annual Report", fontsize=32, color=TEXT_DARK, family="serif", weight="bold", ha="center")
+    ax.text(0.5, 0.585, str(year), fontsize=20, color=PALETTE[0], family="serif", ha="center")
+
+    stat_items = [
+        ("Ending Net Worth", _fmt(stats["end_net_worth"]) if stats["end_net_worth"] is not None else "N/A", None),
+        (
+            "Net Worth Change",
+            f"{'+' if stats['net_worth_change'] >= 0 else ''}{_fmt(stats['net_worth_change'])}" if stats["net_worth_change"] is not None else "N/A",
+            (PALETTE[1] if stats["net_worth_change"] >= 0 else PALETTE[3]) if stats["net_worth_change"] is not None else None,
+        ),
+        ("Total Contributed", _fmt(stats["total_contributed"]), None),
+        ("Avg. Savings Rate", f"{stats['avg_savings_rate']:.1f}%" if stats["avg_savings_rate"] is not None else "N/A", None),
+    ]
+    col_width = 0.8 / len(stat_items)
+    for i, (label, value, color) in enumerate(stat_items):
+        cx = 0.1 + col_width * (i + 0.5)
+        ax.text(cx, 0.50, value, fontsize=15, color=color or TEXT_DARK, family="serif", weight="bold", ha="center")
+        ax.text(cx, 0.455, label, fontsize=8.5, color=TEXT_MUTED, ha="center")
+
+    ax.text(0.5, 0.22, f"Generated {generated_on}", fontsize=9, color=TEXT_MUTED, ha="center")
+
+    pdf.savefig(fig, facecolor="white")
+    plt.close(fig)
+
+
+def _build_toc_page(pdf, year, entries, total_pages):
+    """`entries` is a list of (section_title, page_num) tuples. Rows are
+    built as monospaced dot-leader lines (title, then '.' padding, then a
+    right-aligned page number) since matplotlib has no native "leader"
+    primitive -- a fixed-width font keeps the dots and numbers lined up
+    cleanly without needing to measure rendered text width."""
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Table of Contents", fontsize=18, color=TEXT_DARK, family="serif", y=0.90)
+    ax = fig.add_axes([0.12, 0.15, 0.76, 0.65])
+    ax.axis("off")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    line_width = 54
+    for i, (title, page_num) in enumerate(entries):
+        y = 0.97 - i * 0.07
+        num_str = str(page_num)
+        dots = "." * max(3, line_width - len(title) - len(num_str))
+        ax.text(0, y, f"{title}{dots}{num_str}", fontsize=12, color=TEXT_DARK, family="monospace", va="top")
+
+    _draw_page_chrome(fig, year, None, 2, total_pages)
+    pdf.savefig(fig, facecolor="white")
+    plt.close(fig)
 
 
 def _draw_donut(ax, groups, net_take_home):
@@ -189,7 +298,7 @@ def _draw_sankey(ax, flow):
         return
 
     width, height = 100.0, 55.0
-    node_width, node_padding = 1.4, 1.8
+    node_width, node_padding = 1.4, 2.8
     left_margin, right_margin = 2.0, 32.0
 
     columns = sorted({n["column"] for n in nodes})
@@ -216,6 +325,7 @@ def _draw_sankey(ax, flow):
         for col in columns
     )
 
+    min_label_span = 3.4  # vertical room a node's two-line label needs, regardless of its bar's own thickness
     for col in columns:
         col_nodes = [n for n in node_by_id.values() if n["column"] == col]
         y = 2.0
@@ -223,7 +333,8 @@ def _draw_sankey(ax, flow):
             n["x"] = col_x[col]
             n["y"] = y
             n["h"] = max(n["value"] * scale, 0.3)
-            y += n["h"] + node_padding
+            n["label_span"] = max(n["h"], min_label_span)
+            y += n["label_span"] + node_padding
 
     for n in node_by_id.values():
         out_offset = n["y"]
@@ -258,11 +369,11 @@ def _draw_sankey(ax, flow):
         ax.add_patch(patches.Rectangle((n["x"], n["y"]), node_width, n["h"],
                                         facecolor=NODE_COLOR, edgecolor="none"))
         label_x = n["x"] + node_width + 0.6
-        ax.text(label_x, n["y"] + n["h"] / 2 - 1.0, n["label"], fontsize=6.5, color=TEXT_DARK, va="center")
-        ax.text(label_x, n["y"] + n["h"] / 2 + 1.3, _fmt(n["value"]), fontsize=6, color=TEXT_MUTED, va="center")
+        ax.text(label_x, n["y"] + n["label_span"] / 2 - 1.0, n["label"], fontsize=6.5, color=TEXT_DARK, va="center")
+        ax.text(label_x, n["y"] + n["label_span"] / 2 + 1.3, _fmt(n["value"]), fontsize=6, color=TEXT_MUTED, va="center")
 
 
-def _build_month_page(pdf, year, month):
+def _build_month_page(pdf, year, month, page_num, total_pages, kicker):
     month_str = f"{year}-{month:02d}"
     month_name = calendar.month_name[month]
 
@@ -292,25 +403,25 @@ def _build_month_page(pdf, year, month):
         ax_sankey.text(0.5, 0.5, "No income logged for this month.",
                         ha="center", va="center", color=TEXT_MUTED, fontsize=9)
 
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
 
 
-def _build_annual_charts_page(pdf, year):
+def _build_annual_charts_page(pdf, year, accounts, page_num, total_pages, kicker):
     rows = db.get_annual_trend(year)
     months = [f"{m:02d}" for m in range(1, 13)]
     month_labels = [calendar.month_abbr[m] for m in range(1, 13)]
     group_names = sorted({r["group_name"] for r in rows})
 
-    accounts = db.get_net_worth_history()
     dates = _year_dates(accounts, year)
 
-    # Portrait rather than the month pages' landscape orientation — three
+    # Portrait rather than the month pages' landscape orientation - three
     # stacked charts need more vertical room than a landscape page gives.
     fig, (ax_trend, ax_net_worth, ax_by_account) = plt.subplots(3, 1, figsize=(8.5, 11))
     fig.patch.set_facecolor("white")
-    fig.suptitle(f"{year} \u2014 Annual Trend & Net Worth", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
-    fig.subplots_adjust(left=0.10, right=0.94, top=0.91, bottom=0.06, hspace=0.6)
+    fig.suptitle(f"{year} - Annual Trend & Net Worth", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
+    fig.subplots_adjust(left=0.10, right=0.94, top=0.91, bottom=0.09, hspace=0.6)
 
     # ---- Annual Trend (spending by group, across all 12 months) ----
     ax_trend.set_title("Annual Trend", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
@@ -389,11 +500,12 @@ def _build_annual_charts_page(pdf, year):
         ax_by_account.text(0.5, 0.5, f"No account activity in {year}", ha="center", va="center", color=TEXT_MUTED)
     _style_axes(ax_by_account)
 
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
 
 
-def _build_comparison_page(pdf, year):
+def _build_comparison_page(pdf, year, page_num, total_pages, kicker):
     """Multi-Year Comparison (total monthly spend, several years overlaid)
     and Savings Rate Over Time (% of Net Take-Home saved each month) --
     the same two charts the Report page shows live, added here so the PDF
@@ -406,11 +518,11 @@ def _build_comparison_page(pdf, year):
 
     fig, (ax_multi, ax_savings) = plt.subplots(2, 1, figsize=(8.5, 11))
     fig.patch.set_facecolor("white")
-    fig.suptitle(f"{year} \u2014 Multi-Year Comparison & Savings Rate", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
+    fig.suptitle(f"{year} - Multi-Year Comparison & Savings Rate", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
     fig.subplots_adjust(left=0.10, right=0.94, top=0.91, bottom=0.08, hspace=0.35)
 
     # ---- Multi-Year Comparison ----
-    ax_multi.set_title("Multi-Year Comparison \u2014 Total Monthly Spending", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
+    ax_multi.set_title("Multi-Year Comparison - Total Monthly Spending", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
     has_any_spending = any(any(v for v in series) for series in trend_by_year.values())
     if has_any_spending:
         for i, y in enumerate(years):
@@ -451,12 +563,12 @@ def _build_comparison_page(pdf, year):
         ax_savings.text(0.5, 0.5, f"No income logged in {year}", ha="center", va="center", color=TEXT_MUTED)
     _style_axes(ax_savings)
 
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
 
 
 def _draw_risk_metrics_table(ax, accounts_with_metrics):
-    ax.set_title("Investment Return & Risk Metrics", fontsize=13, color=TEXT_DARK, family="serif", loc="left")
     ax.axis("off")
     if not accounts_with_metrics:
         ax.text(0.5, 0.5, "Not enough valuation history yet to compute these metrics\n(each account needs at least two logged valuations).",
@@ -478,13 +590,13 @@ def _draw_risk_metrics_table(ax, accounts_with_metrics):
                 return "N/A"
             return f"{v:+.1f}%" if sign else f"{v:.1f}%"
 
-        duration = f"{m['drawdown_duration_days']} days" if m.get("drawdown_duration_days") else "\u2014"
+        duration = f"{m['drawdown_duration_days']} days" if m.get("drawdown_duration_days") else "-"
         if m.get("recovery_days") is not None:
             recovery = f"{m['recovery_days']} days"
         elif m.get("recovered") is False:
             recovery = "Not yet"
         else:
-            recovery = "\u2014"
+            recovery = "-"
 
         rows.append([
             name,
@@ -541,7 +653,7 @@ def _draw_metric_explanation_block(ax, y, title, desc, formula, width=92):
     return y - 0.03
 
 
-def _build_metrics_table_page(pdf, accounts):
+def _build_metrics_table_page(pdf, year, accounts, page_num, total_pages, kicker):
     """Landscape page: the Return & Risk Metrics summary table (per
     account, over each account's full history -- these are lifetime
     performance metrics, not scoped to the report's year)."""
@@ -554,14 +666,15 @@ def _build_metrics_table_page(pdf, accounts):
     fig.patch.set_facecolor("white")
     fig.suptitle("Investment Return & Risk Metrics", fontsize=18, color=TEXT_DARK, family="serif", y=0.95)
 
-    ax = fig.add_axes([0.05, 0.08, 0.9, 0.78])
+    ax = fig.add_axes([0.05, 0.08, 0.9, 0.8])
     _draw_risk_metrics_table(ax, accounts_with_metrics)
 
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
 
 
-def _build_return_metrics_explanations_page(pdf):
+def _build_return_metrics_explanations_page(pdf, year, page_num, total_pages, kicker):
     """Portrait page: Simple Return, CAGR, XIRR, and TWRR -- the four ways
     of asking "how well did this investment do," each more rigorous about
     cash-flow timing than the last."""
@@ -578,7 +691,7 @@ def _build_return_metrics_explanations_page(pdf):
         ("XIRR",
          "The cash-flow-timed version of CAGR: every contribution is dated individually against the current value, so a deposit made "
          "last month isn't credited with a full year of growth the way CAGR would credit it.",
-         "\u03a3 CF\u1d62 / (1 + r)^((Date\u1d62 \u2212 Date\u2080) / 365) = 0  \u2014  solved for r"),
+         "\u03a3 CF\u1d62 / (1 + r)^((Date\u1d62 \u2212 Date\u2080) / 365) = 0  -  solved for r"),
         ("Time-Weighted Rate of Return (TWRR)",
          "Links together the return from each valuation to the next, backing out any contributions made in between -- so the number "
          "reflects how well the money performed, not how much (or when) was added to the account. This is the one that isolates the "
@@ -596,11 +709,12 @@ def _build_return_metrics_explanations_page(pdf):
     for title, desc, formula in explanations:
         y = _draw_metric_explanation_block(ax, y, title, desc, formula)
 
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
 
 
-def _build_risk_metrics_explanations_page(pdf):
+def _build_risk_metrics_explanations_page(pdf, year, page_num, total_pages, kicker):
     """Portrait page: Annualized Volatility, plus Max Drawdown / Duration /
     Recovery Time combined into one block since all three describe the
     same single worst historical decline -- together these answer "how
@@ -630,6 +744,225 @@ def _build_risk_metrics_explanations_page(pdf):
     for title, desc, formula in explanations:
         y = _draw_metric_explanation_block(ax, y, title, desc, formula)
 
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
+    pdf.savefig(fig, facecolor="white")
+    plt.close(fig)
+
+
+def _severity_color(severity):
+    return {"warning": PALETTE[3], "good": PALETTE[1]}.get(severity, TEXT_MUTED)
+
+
+def _draw_insight_group(ax, y, heading, insights, width=92):
+    """Draws one heading followed by each insight as a colored bullet label
+    + wrapped detail line (color keyed to severity: warning/good/neutral).
+    Returns the y position just below the block."""
+    ax.text(0, y, heading, fontsize=12, color=TEXT_DARK, family="serif", weight="bold", va="top")
+    y -= 0.03
+    if not insights:
+        ax.text(0.02, y, "No flags at the current risk profile.", fontsize=9, color=TEXT_MUTED, va="top")
+        return y - 0.04
+    for ins in insights:
+        color = _severity_color(ins["severity"])
+        ax.text(0.02, y, f"\u25CF {ins['label']}", fontsize=10, color=color, weight="bold", va="top")
+        y -= 0.022
+        for line in textwrap.wrap(ins["detail"], width=width):
+            ax.text(0.045, y, line, fontsize=9, color=TEXT_MUTED, va="top")
+            y -= 0.02
+        y -= 0.012
+    return y - 0.015
+
+
+def _compute_insights_context(accounts):
+    """Computes the blended-portfolio insights plus the list of accounts
+    that have any insights of their own -- shared by generate_annual_report
+    (which needs to know ahead of time whether this page will render at
+    all, to get the Table of Contents page numbers right) and the page
+    builder itself, so it's only computed once per report."""
+    risk_profile = db.get_setting("portfolio_risk_profile") or "moderate"
+    portfolio = db.compute_portfolio_metrics(accounts, risk_profile)
+    accounts_with_insights = [a for a in accounts if a.get("insights")]
+    has_page = bool(portfolio or accounts_with_insights)
+    return portfolio, accounts_with_insights, has_page
+
+
+def _build_investment_insights_page(pdf, year, portfolio, accounts_with_insights, page_num, total_pages, kicker):
+    """Portrait page: plain-language "is this actually a good investment, or
+    does it just look like one" flags -- for the blended portfolio (a true
+    growth-of-$1 pool across every account, not a weighted average of
+    per-account metrics) and for each account with enough history. See
+    generate_investment_insights() in db_manager.py."""
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Investment Insights", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
+    ax = fig.add_axes([0.08, 0.04, 0.86, 0.89])
+    ax.axis("off")
+
+    y = 0.99
+    if portfolio:
+        y = _draw_insight_group(ax, y, "Portfolio (blended across all accounts)", portfolio.get("insights") or [])
+    for a in accounts_with_insights:
+        if y < 0.08:
+            break  # page is full; the rest are still summarized in the metrics table
+        y = _draw_insight_group(ax, y, a["name"], a["insights"])
+
+    disclaimer = "Thresholds are banded by each account's Risk Profile (Low/Medium/High) and are heuristics meant to prompt a closer look, not investment advice."
+    dy = 0.05
+    for line in textwrap.wrap(disclaimer, width=100):
+        ax.text(0, dy, line, fontsize=8, color=TEXT_MUTED, va="bottom", style="italic")
+        dy -= 0.018
+
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
+    pdf.savefig(fig, facecolor="white")
+    plt.close(fig)
+
+
+def _fmt_range(floor, ceiling):
+    """Formats a bracket floor-ceiling range for a single table cell.
+    Dollar signs are escaped here because matplotlib treats a *pair* of
+    literal '$' in one text string as a matched mathtext span - with two
+    formatted dollar amounts in the same cell, that silently swallows both
+    '$' characters and collapses the surrounding whitespace. A lone '$'
+    (as used everywhere else in this module) isn't paired, so it renders
+    fine as-is; this helper only exists for the two-amount case."""
+    lo = f"\\${floor:,.2f}"
+    hi = f"\\${ceiling:,.2f}" if ceiling is not None else "and up"
+    return f"{lo} \u2013 {hi}"
+
+
+def _draw_tax_source_table(ax, sources, totals):
+    """Same columns as the Report page's Tax tab table: gross pay,
+    deductions, tax withheld, pre-tax investments, employer match, and net
+    -- per income source, plus a totals row. Returns the y position just
+    below the table (axes-fraction coordinates, like the other page
+    builders in this module)."""
+    ax.set_title("Income & Withholding by Source", fontsize=11, color=TEXT_DARK, family="serif", loc="left")
+    ax.axis("off")
+
+    col_labels = ["Source", "Gross Pay", "Deductions", "Tax\nWithheld", "Pre-Tax\nInvestments", "Employer\nMatch", "Net"]
+    rows = [[s["label"], _fmt(s["gross"]), _fmt(s["total_deductions"]), _fmt(s["total_tax_withheld"]),
+             _fmt(s["total_investments"]), _fmt(s["total_match"]), _fmt(s["net"])] for s in sources]
+    rows.append(["Total", _fmt(totals["gross"]), _fmt(totals["total_deductions"]), _fmt(totals["total_tax_withheld"]),
+                 _fmt(totals["total_investments"]), _fmt(totals["total_match"]), _fmt(totals["net_take_home"])])
+
+    n_rows = len(rows) + 1
+    height_frac = min(0.13 * n_rows, 0.44)
+    y0 = 1.0 - height_frac
+    table = ax.table(cellText=rows, colLabels=col_labels, loc="upper left", cellLoc="left", colLoc="left",
+                      bbox=[0.0, y0, 1.0, height_frac],
+                      colWidths=[0.19, 0.12, 0.13, 0.14, 0.16, 0.14, 0.12])
+    table.auto_set_font_size(False)
+    table.set_fontsize(8.5)
+    table.scale(1, 1.5)  # extra row height so the two-line headers have room to breathe
+    last_row = len(rows)
+    for (row, _col), cell in table.get_celld().items():
+        cell.set_edgecolor(GRID)
+        if row == 0:
+            cell.set_facecolor("#EDE7D8")
+            cell.set_text_props(color=TEXT_DARK, weight="bold")
+        elif row == last_row:
+            cell.set_facecolor("#F3EFE2")
+            cell.set_text_props(color=TEXT_DARK, weight="bold")
+        else:
+            cell.set_facecolor("white")
+            cell.set_text_props(color=TEXT_DARK)
+    return y0 - 0.05
+
+
+def _draw_tax_estimate_stats(ax, y, estimate):
+    """Six-figure stat readout (taxable income, marginal/effective rate,
+    estimated tax, amount withheld, refund/owed) as a plain label/value
+    grid -- the print equivalent of the stat cards on the Report page's
+    Tax tab, since matplotlib has no card-grid primitive to reuse.
+    Returns the y position just below the block."""
+    balance = estimate["estimated_balance"]
+    balance_label = "Estimated Refund" if balance >= 0 else "Estimated Amount Owed"
+    balance_color = PALETTE[1] if balance >= 0 else PALETTE[3]
+
+    stats = [
+        ("Taxable Income (est.)", _fmt(estimate["taxable_income"]), TEXT_DARK),
+        ("Marginal Bracket", f"{estimate['marginal_rate']}%", TEXT_DARK),
+        ("Effective Rate", f"{estimate['effective_rate']}%", TEXT_DARK),
+        ("Estimated Federal Tax", _fmt(estimate["tax"]), TEXT_DARK),
+        ("Already Withheld", _fmt(estimate["amount_withheld"]), TEXT_DARK),
+        (balance_label, _fmt(abs(balance)), balance_color),
+    ]
+    col_x = [0.0, 0.35, 0.70]
+    row_height = 0.075
+    for i, (label, value, color) in enumerate(stats):
+        x = col_x[i % 3]
+        row_y = y - (i // 3) * row_height
+        ax.text(x, row_y, label.upper(), fontsize=7, color=TEXT_MUTED, va="top")
+        ax.text(x, row_y - 0.028, value, fontsize=13, color=color, family="serif", weight="bold", va="top")
+    rows_used = -(-len(stats) // 3)  # ceil division
+    return y - rows_used * row_height - 0.03
+
+
+def _draw_tax_bracket_table(ax, y, estimate):
+    """The marginal bracket breakdown (rate, bracket range, amount taxed at
+    that rate, tax owed on that slice) for the report year's estimate.
+    Returns the y position just below the table."""
+    ax.text(0, y, f"{estimate['bracket_year']} Federal Bracket Breakdown \u2013 {estimate['filing_status_label']}",
+             fontsize=11, color=TEXT_DARK, family="serif", weight="bold", va="top")
+    y -= 0.045
+
+    if not estimate["breakdown"]:
+        ax.text(0, y, "No taxable income estimated for this year.", fontsize=9, color=TEXT_MUTED, va="top")
+        return y - 0.04
+
+    col_labels = ["Rate", "Bracket", "Amount Taxed", "Tax"]
+    rows = []
+    for b in estimate["breakdown"]:
+        rows.append([f"{b['rate']}%", _fmt_range(b["floor"], b["ceiling"]), _fmt(b["amount_taxed"]), _fmt(b["tax"])])
+
+    n_rows = len(rows) + 1
+    height_frac = min(0.075 * n_rows, max(y - 0.06, 0.08))
+    y0 = y - height_frac
+    table = ax.table(cellText=rows, colLabels=col_labels, loc="upper left", cellLoc="left", colLoc="left",
+                      bbox=[0.0, y0, 1.0, height_frac],
+                      colWidths=[0.14, 0.42, 0.22, 0.22])
+    table.auto_set_font_size(False)
+    table.set_fontsize(8.5)
+    for (row, _col), cell in table.get_celld().items():
+        cell.set_edgecolor(GRID)
+        if row == 0:
+            cell.set_facecolor("#EDE7D8")
+            cell.set_text_props(color=TEXT_DARK, weight="bold")
+        else:
+            cell.set_facecolor("white")
+            cell.set_text_props(color=TEXT_DARK)
+    return y0 - 0.04
+
+
+def _build_tax_summary_page(pdf, year, tax_data, page_num, total_pages, kicker):
+    """Portrait page: the same Year-End Tax Summary + estimated-federal-tax
+    breakdown shown live on the Report page's Tax tab (source table,
+    taxable-income/estimated-tax stats, and the marginal bracket
+    breakdown). generate_annual_report() skips this page entirely when
+    tax_data is None (no income logged for the year), same condition
+    get_year_end_tax_summary() itself uses."""
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.patch.set_facecolor("white")
+    fig.suptitle(f"{year} - Year-End Tax Summary", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
+    ax = fig.add_axes([0.08, 0.05, 0.86, 0.87])
+    ax.axis("off")
+
+    y = _draw_tax_source_table(ax, tax_data["sources"], tax_data["totals"])
+    estimate = tax_data["estimate"]
+    y = _draw_tax_estimate_stats(ax, y, estimate)
+    y = _draw_tax_bracket_table(ax, y, estimate)
+
+    disclaimer = (
+        f"Estimate only, based on {estimate['bracket_year']} IRS federal tax brackets and the {estimate['bracket_year']} "
+        f"standard deduction for {estimate['filing_status_label']}. Doesn't account for credits, itemizing, or income "
+        "outside what's tracked in this app - not a substitute for a real tax preparer."
+    )
+    dy = max(y, 0.05)
+    for line in textwrap.wrap(disclaimer, width=110):
+        ax.text(0, dy, line, fontsize=8, color=TEXT_MUTED, va="top", style="italic")
+        dy -= 0.02
+
+    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
 
@@ -637,15 +970,72 @@ def _build_risk_metrics_explanations_page(pdf):
 def generate_annual_report(year):
     """Returns a BytesIO containing the full multi-page PDF for the given year."""
     year = int(year)
+    accounts = db.get_net_worth_history()
+
+    # Whether the Investment Insights page will render is data-dependent
+    # (it's skipped entirely if there's nothing to show), so this is
+    # computed once, up front, to get the Table of Contents' page numbers
+    # right without a two-pass render. Same idea for the Tax Summary page:
+    # get_year_end_tax_summary() returns None when no income was logged
+    # for the year at all.
+    portfolio, accounts_with_insights, has_insights_page = _compute_insights_context(accounts)
+    filing_status = db.get_setting("tax_filing_status", "single")
+    tax_data = db.get_year_end_tax_summary(year, filing_status)
+    has_tax_page = tax_data is not None
+
+    page_months_start = 3
+    page_metrics = page_months_start + 12
+    page_annual_summary = page_metrics + 1
+    page_tax = page_annual_summary + 2
+    page_insights = page_tax + (1 if has_tax_page else 0)
+    page_appendix = page_insights + (1 if has_insights_page else 0)
+    total_pages = page_appendix + 2 - 1
+
+    toc_entries = [
+        ("Monthly Detail (January - December)", page_months_start),
+        ("Investment Metrics Table", page_metrics),
+        ("Annual Summary", page_annual_summary),
+    ]
+    if has_tax_page:
+        toc_entries.append(("Year-End Tax Summary", page_tax))
+    if has_insights_page:
+        toc_entries.append(("Investment Insights", page_insights))
+    toc_entries.append(("Appendix: Metric Definitions", page_appendix))
+
+    stats = _compute_year_in_review_stats(year, accounts)
+    now = datetime.now()
+    generated_on = f"{now:%B} {now.day}, {now:%Y}"
+
     buf = io.BytesIO()
     with PdfPages(buf) as pdf:
+        _build_cover_page(pdf, year, stats, generated_on)
+        _build_toc_page(pdf, year, toc_entries, total_pages)
+
+        page = page_months_start
         for month in range(1, 13):
-            _build_month_page(pdf, year, month)
-        _build_annual_charts_page(pdf, year)
-        _build_comparison_page(pdf, year)
-        _build_metrics_table_page(pdf, db.get_net_worth_history())
-        _build_return_metrics_explanations_page(pdf)
-        _build_risk_metrics_explanations_page(pdf)
+            _build_month_page(pdf, year, month, page, total_pages, "MONTHLY DETAIL")
+            page += 1
+
+        _build_metrics_table_page(pdf, year, accounts, page, total_pages, "INVESTMENT METRICS")
+        page += 1
+
+        _build_annual_charts_page(pdf, year, accounts, page, total_pages, "ANNUAL SUMMARY")
+        page += 1
+        _build_comparison_page(pdf, year, page, total_pages, "ANNUAL SUMMARY")
+        page += 1
+
+        if has_tax_page:
+            _build_tax_summary_page(pdf, year, tax_data, page, total_pages, "TAX SUMMARY")
+            page += 1
+
+        if has_insights_page:
+            _build_investment_insights_page(pdf, year, portfolio, accounts_with_insights, page, total_pages, "INVESTMENT INSIGHTS")
+            page += 1
+
+        _build_return_metrics_explanations_page(pdf, year, page, total_pages, "APPENDIX: METRIC DEFINITIONS")
+        page += 1
+        _build_risk_metrics_explanations_page(pdf, year, page, total_pages, "APPENDIX: METRIC DEFINITIONS")
+        page += 1
 
         info = pdf.infodict()
         info["Title"] = f"Personal Finance Annual Report {year}"

@@ -25,6 +25,8 @@
   --positive:#74A788;
   --negative:#C3654D;
 
+  --warning:#D9A62C;
+
   --overlay:rgba(10,13,17,0.65);
 
   --text-on-accent:#10151C;
@@ -43,7 +45,7 @@
    switching [data-theme] on <html> re-themes the whole app instantly.
    ========================================================================= */
 
-/* Blue — white page, blue-tinted cards */
+/* Blue - white page, blue-tinted cards */
 [data-theme="blue"]{
   --bg-page:#FFFFFF;
   --bg-card:#b4d5f3;
@@ -65,10 +67,12 @@
   --positive:#3F7A57;
   --negative:#A14B36;
 
+  --warning:#A8790E;
+
   --overlay:rgba(20,30,40,0.45);
 }
 
-/* Green — white page, fresh mint/sage-tinted cards */
+/* Green - white page, fresh mint/sage-tinted cards */
 [data-theme="green"]{
   --bg-page:#FFFFFF;
   --bg-card:#E2EFE3;
@@ -90,10 +94,12 @@
   --positive:#3F7A57;
   --negative:#A14B36;
 
+  --warning:#A8790E;
+
   --overlay:rgba(15,30,20,0.45);
 }
 
-/* Dark Green — deep forest-charcoal page, moody green-tinted cards */
+/* Dark Green - deep forest-charcoal page, moody green-tinted cards */
 [data-theme="dark-green"]{
   --bg-page:#212723;
   --bg-card:#2B352E;
@@ -115,10 +121,12 @@
   --positive:#6BB882;
   --negative:#D96B53;
 
+  --warning:#DDAE3F;
+
   --overlay:rgba(10,20,12,0.6);
 }
 
-/* Red — white page, muted clay-red cards */
+/* Red - white page, muted clay-red cards */
 [data-theme="red"]{
   --bg-page:#FFFFFF;
   --bg-card:#F3E4DF;
@@ -140,10 +148,12 @@
   --positive:#3F7A57;
   --negative:#8B3A2B;
 
+  --warning:#A8790E;
+
   --overlay:rgba(40,20,15,0.45);
 }
 
-/* Dark Red — deep charcoal-red page, rich crimson-tinted cards */
+/* Dark Red - deep charcoal-red page, rich crimson-tinted cards */
 [data-theme="dark-red"]{
   --bg-page:#2C2222;
   --bg-card:#3A2A2A;
@@ -165,10 +175,12 @@
   --positive:#74A788;
   --negative:#D9534F;
 
+  --warning:#DDAE3F;
+
   --overlay:rgba(20,10,10,0.6);
 }
 
-/* Standard — white page, dark gray cards */
+/* Standard - white page, dark gray cards */
 [data-theme="standard"]{
   --bg-page:#FFFFFF;
   --bg-card:#3A3F44;
@@ -190,10 +202,12 @@
   --positive:#74A788;
   --negative:#C3654D;
 
+  --warning:#D9A62C;
+
   --overlay:rgba(20,20,20,0.5);
 }
 
-/* Dark Standard — gray page, dark gray cards, no blue tint */
+/* Dark Standard - gray page, dark gray cards, no blue tint */
 [data-theme="dark-standard"]{
   --bg-page:#26292C;
   --bg-card:#323639;
@@ -214,6 +228,8 @@
 
   --positive:#74A788;
   --negative:#C3654D;
+
+  --warning:#D9A62C;
 
   --overlay:rgba(10,10,10,0.55);
 }
@@ -260,7 +276,7 @@ button{
    Fixed to the viewport (not a normal flex sibling) so its height is
    always exactly 100vh, independent of how tall #main-content gets.
    Without this, the navbar stretched to match content height on pages
-   with lots of cards, and the whole page scrolled together — pushing
+   with lots of cards, and the whole page scrolled together - pushing
    the Ledger Month picker at the bottom out of view. */
 #main-navbar{
   position:fixed;
@@ -330,6 +346,12 @@ button{
 .nav-footer input[type=month], .nav-footer select{
   width:100%;
 }
+.global-month-nav{
+  display:flex; gap:8px; margin-top:8px;
+}
+.global-month-nav .btn-ghost{
+  flex:1; padding:6px 4px; font-size:12px; text-align:center;
+}
 
 /* ---- Main content ---- */
 #main-content{
@@ -356,7 +378,13 @@ button{
   gap:20px;
 }
 .page-header-actions{ display:flex; gap:10px; flex:0 0 auto; }
-.nav-import-btn{ width:100%; font-size:12px; }
+.nav-import-btn{
+  width:100%;
+  font-size:13px;
+  font-weight:600;
+  padding:10px 14px;
+  border-radius:var(--radius);
+}
 .preset-toolbar{
   display:flex;
   gap:8px;
@@ -371,7 +399,7 @@ button{
 }
 
 /* =========================================================================
-   CARDS / PANELS — the "paper" surfaces within the ink page
+   CARDS / PANELS - the "paper" surfaces within the ink page
    ========================================================================= */
 .card{
   background:var(--bg-card);
@@ -396,7 +424,15 @@ button{
 .assign-status{ font-family:var(--font-mono); font-size:12px; color:var(--text-muted); }
 .assign-status span{ color:var(--text-heading); }
 
-/* Collapsible cards — header (and any header-row siblings, e.g. a status
+.copy-forward-banner{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  background:var(--bg-alt); border:1px solid var(--accent-dim); border-radius:var(--radius);
+  padding:10px 14px; margin-bottom:14px; font-size:13px; color:var(--text-heading);
+}
+.copy-forward-banner .btn{ padding:6px 12px; font-size:12px; }
+.copy-forward-banner .btn-ghost{ padding:6px 12px; font-size:12px; }
+
+/* Collapsible cards - header (and any header-row siblings, e.g. a status
    hint) always stays visible; only .card-content hides. Used for cards
    that default to a minimized state (Pay Schedule, Log a transaction,
    Import Transactions, New sinking fund/account) to keep the page compact
@@ -430,7 +466,7 @@ input, select{
   font-family:var(--font-body);
 }
 /* Native date-input calendar icon defaults to a dark glyph in some engines,
-   which disappears against our dark input background — force it light. */
+   which disappears against our dark input background - force it light. */
 input[type="date"]::-webkit-calendar-picker-indicator{
   filter:invert(0.85);
   cursor:pointer;
@@ -460,6 +496,12 @@ input:focus, select:focus, button:focus{
   transition:background .15s ease;
 }
 .inline-form button:hover, .btn:hover{ background:var(--accent-hover); }
+
+.inline-checkbox-label{
+  display:flex; align-items:center; gap:6px;
+  font-size:13px; color:var(--text-muted);
+}
+.inline-checkbox-label input[type="checkbox"]{ width:auto; margin:0; }
 
 .btn-ghost{
   background:transparent;
@@ -599,6 +641,10 @@ input:focus, select:focus, button:focus{
 .ledger-table tr:hover td{ background:var(--bg-alt); }
 .ledger-table .negative{ color:var(--negative); }
 .ledger-table .positive{ color:var(--positive); }
+.ledger-table tfoot td{
+  font-weight:600; color:var(--text-heading);
+  border-top:1px solid var(--border); border-bottom:none;
+}
 
 .import-month-nav{
   display:flex;
@@ -663,6 +709,26 @@ input:focus, select:focus, button:focus{
   font-size:12px;
   color:var(--text-muted);
 }
+
+.split-tx-row{
+  display:flex; gap:10px; align-items:center; margin-bottom:8px;
+}
+.split-tx-row select{ flex:1.4; }
+.split-tx-row input[type="text"]{ flex:1.2; }
+.split-tx-row input[type="number"]{ flex:0.7; }
+.split-tx-row .btn-ghost{ padding:6px 10px; }
+.split-tx-remaining{
+  font-family:var(--font-mono); font-size:12px; margin-top:8px;
+}
+.split-tx-remaining.balanced{ color:var(--positive); }
+.split-tx-remaining.unbalanced{ color:var(--negative); }
+
+.split-badge{
+  display:inline-block; margin-left:8px;
+  font-family:var(--font-mono); font-size:9px; text-transform:uppercase; letter-spacing:0.05em;
+  color:var(--accent); border:1px solid var(--accent-dim); border-radius:10px;
+  padding:1px 6px; vertical-align:middle;
+}
 #annual-report-preview{
   display:none;
   width:100%;
@@ -698,6 +764,43 @@ input:focus, select:focus, button:focus{
 .subpage.active{ display:block; }
 
 /* =========================================================================
+   SUB-NAV (Report page) - same visual language as Track's subnav, but its
+   own class names so the two never collide, plus the unified Report Year
+   control riding along the same row.
+   ========================================================================= */
+.report-subnav{
+  display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;
+  border-bottom:1px solid var(--border);
+  margin-bottom:22px;
+}
+.report-subnav-tabs{ display:flex; }
+.report-subnav-tab{
+  background:transparent;
+  border:none;
+  color:var(--text-muted);
+  padding:10px 4px;
+  margin-right:22px;
+  font-size:13px;
+  border-bottom:2px solid transparent;
+}
+.report-subnav-tab.active{
+  color:var(--text-heading);
+  border-bottom-color:var(--accent);
+}
+.report-subpage{ display:none; }
+.report-subpage.active{ display:block; }
+.report-year-control{
+  display:flex; align-items:center; gap:6px;
+  padding-bottom:10px;
+}
+.report-year-control label{
+  font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted);
+  margin-right:2px;
+}
+.report-year-control .year-input{ margin-left:0; width:76px; }
+.report-year-control .btn-ghost{ padding:4px 10px; font-size:13px; line-height:1; }
+
+/* =========================================================================
    SINKING FUNDS
    ========================================================================= */
 .fund-card{
@@ -725,11 +828,66 @@ input:focus, select:focus, button:focus{
 .fund-card .ledger-table{ margin-top:14px; }
 
 /* Shared editable-row controls (Sinking Fund contributions, Net Worth
-   contributions/valuations) — dressed to match the Daily Ledger table. */
+   contributions/valuations) - dressed to match the Daily Ledger table. */
 .row-actions{
   display:flex; gap:6px; justify-content:flex-end;
 }
 .row-actions .btn-ghost{ padding:2px 8px; font-size:11px; }
+
+/* Transaction row "..." action menu - collapses Edit/Split/Un-split/Delete
+   into one popover so the row doesn't get crowded. */
+.row-actions-menu{ position:relative; display:inline-block; }
+.row-actions-menu-btn{
+  background:transparent;
+  border:1px solid var(--border);
+  color:var(--text-muted);
+  width:26px; height:26px;
+  border-radius:var(--radius);
+  font-size:14px;
+  line-height:1;
+  padding:0;
+}
+.row-actions-menu-btn:hover{ color:var(--accent); border-color:var(--accent); }
+.row-actions-menu-list{
+  display:none;
+  position:absolute;
+  right:0; top:calc(100% + 4px);
+  z-index:20;
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:0 6px 18px rgba(0,0,0,0.35);
+  min-width:130px;
+  padding:4px;
+}
+.row-actions-menu.open .row-actions-menu-list{ display:flex; flex-direction:column; }
+.row-actions-menu-list button{
+  background:transparent;
+  border:none;
+  color:var(--text-body);
+  text-align:left;
+  padding:7px 10px;
+  font-size:12px;
+  border-radius:var(--radius);
+  white-space:nowrap;
+}
+.row-actions-menu-list button:hover{ background:var(--bg-alt); color:var(--accent); }
+.row-actions-menu-list button.danger:hover{ color:var(--negative); }
+
+/* "Create an Automate rule from this" - shown inline on unassigned
+   transaction rows so categorizing a recurring merchant doesn't require a
+   trip to the Automate tab to retype the pattern by hand. */
+.tx-automate-shortcut{
+  background:transparent;
+  border:1px dashed var(--accent-dim);
+  color:var(--accent);
+  padding:2px 8px;
+  font-size:11px;
+  border-radius:var(--radius);
+  margin-left:6px;
+  white-space:nowrap;
+}
+.tx-automate-shortcut:hover{ border-color:var(--accent); color:var(--accent-hover); }
 .ledger-table tr.editing td{ background:var(--bg-alt); }
 .ledger-table .cell-date input, .ledger-table .cell-amount input{
   padding:4px 6px; font-size:12px; width:100%;
@@ -750,7 +908,7 @@ input:focus, select:focus, button:focus{
 .account-card-actions{ display:flex; align-items:center; gap:8px; }
 
 /* Remove sits next to the +/- toggle in both account cards and fund cards
-   (and debt cards, which reuse .account-card-actions) — .btn-ghost has no
+   (and debt cards, which reuse .account-card-actions) - .btn-ghost has no
    size of its own otherwise, so it was rendering at the browser's default
    button height while the toggle is a fixed 26px square. Matching the
    height here (not a fixed width, since "Remove" is a word, not an icon)
@@ -772,6 +930,27 @@ input:focus, select:focus, button:focus{
   border-radius:12px;
   padding:2px 8px;
 }
+
+/* Pay Schedule cards (Budget page) reuse the .account-card shell -- each
+   is one job/income period, editable in place. The name input replaces
+   the usual <h3> in the card header, so it's stripped of its own border
+   until focused/hovered to still read as a heading at rest. */
+.pay-schedule-item{ margin-bottom:18px; }
+.pay-schedule-item:last-child{ margin-bottom:0; }
+.ps-name-input{
+  font-family:var(--font-serif, serif);
+  font-size:16px;
+  font-weight:600;
+  color:var(--text-heading);
+  background:transparent;
+  border:1px solid transparent;
+  border-radius:4px;
+  padding:2px 6px;
+  margin-left:-6px;
+  flex:1;
+}
+.ps-name-input:hover, .ps-name-input:focus{ border-color:var(--border); background:var(--bg-alt); }
+
 .account-figures{ display:flex; gap:28px; margin:12px 0; }
 .account-figures .figure-label{ font-size:11px; color:var(--text-muted); text-transform:uppercase; }
 .account-figures .figure-value{ font-family:var(--font-mono); font-size:18px; color:var(--text-heading); }
@@ -784,6 +963,34 @@ input:focus, select:focus, button:focus{
   font-size:9px; text-transform:none; letter-spacing:0; color:var(--text-muted);
   border-bottom:1px dotted var(--text-muted); cursor:help;
 }
+
+/* Investment Insights - plain-language flags (see generate_investment_insights
+   in db_manager.py). Warnings/good/neutral share the same card shape and
+   are told apart by their left border + label color only, matching the
+   app's existing --positive/--negative theme colors rather than a separate
+   traffic-light palette. */
+.insight-list{ display:flex; flex-direction:column; gap:8px; margin-top:4px; }
+.insight-section{ margin-bottom:16px; }
+.insight-section:last-child{ margin-bottom:0; }
+.insight-badge{
+  border-left:3px solid var(--text-muted);
+  background:var(--bg-alt);
+  border-radius:4px;
+  padding:8px 12px;
+}
+.insight-label{ font-size:12px; font-weight:600; margin-bottom:2px; }
+.insight-detail{ font-size:12px; color:var(--text-muted); line-height:1.45; }
+
+.account-risk-profile-select{
+  font-family:var(--font-mono);
+  font-size:11px;
+  color:var(--accent);
+  background:transparent;
+  border:1px solid var(--accent-dim);
+  border-radius:12px;
+  padding:2px 6px;
+}
+#portfolio-insights-card .chart-header-row select{ width:auto; }
 
 .progress-bars-wrap{ display:flex; flex-direction:column; gap:12px; }
 .progress-row-label{
@@ -814,15 +1021,19 @@ th.progress-col, td.progress-col{ width:110px; }
 .tab-toggle-btn.active{ background:var(--accent); color:var(--text-on-accent); border-color:var(--accent); }
 .tx-action-panel{ display:none; }
 .tx-action-panel.active{ display:block; }
-.account-forms{ display:flex; gap:20px; flex-wrap:wrap; }
-.account-forms form{ display:flex; gap:8px; }
+.account-forms{ display:grid; grid-template-columns:repeat(3, 1fr); gap:20px; }
+.account-forms h3{
+  font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted);
+  margin:0 0 8px;
+}
+.account-forms form{ display:flex; flex-direction:column; gap:8px; }
 .account-history{
   margin-top:14px;
   padding-top:14px;
   border-top:1px dashed var(--border);
 }
 .account-history.collapsed{ display:none; }
-.account-import-form{ display:flex; gap:8px; align-items:center; margin-top:14px; }
+.account-import-form{ display:flex; flex-direction:column; gap:8px; align-items:stretch; }
 .account-import-status{ margin-top:6px; }
 .account-history-tables{
   display:grid;
@@ -910,7 +1121,7 @@ th.progress-col, td.progress-col{ width:110px; }
 }
 .status-pill.under{ color:var(--positive); border-color:var(--positive); }
 .status-pill.over{ color:var(--negative); border-color:var(--negative); }
-.status-pill.near{ color:var(--accent); border-color:var(--accent); }
+.status-pill.near{ color:var(--warning); border-color:var(--warning); }
 
 /* Simplified flow diagram (Gross Pay -> Deductions/Investments/Groups) */
 .flow-row{
@@ -943,4 +1154,77 @@ th.progress-col, td.progress-col{ width:110px; }
   .nav-footer{ margin-top:0; border-top:none; padding:0 0 0 12px; }
   #main-content{ margin-left:0; padding:24px; }
   .report-grid-1-2{ grid-template-columns:1fr; }
+  .account-forms{ grid-template-columns:1fr; }
 }
+/* =========================================================================
+   TOASTS - replaces native alert() for non-blocking status messages.
+   Stacks top-right, each toast auto-dismisses on its own timer and can
+   also be dismissed by click.
+   ========================================================================= */
+#toast-stack{
+  position:fixed;
+  top:20px; right:20px;
+  z-index:1000;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  max-width:360px;
+  pointer-events:none;
+}
+.toast{
+  pointer-events:auto;
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-left:3px solid var(--accent);
+  border-radius:var(--radius);
+  box-shadow:0 8px 24px rgba(0,0,0,0.4);
+  padding:12px 14px;
+  font-size:13px;
+  color:var(--text-body);
+  line-height:1.4;
+  cursor:pointer;
+  opacity:0;
+  transform:translateX(16px);
+  transition:opacity .2s ease, transform .2s ease;
+}
+.toast.toast-visible{ opacity:1; transform:translateX(0); }
+.toast.toast-success{ border-left-color:var(--positive); }
+.toast.toast-error{ border-left-color:var(--negative); }
+.toast.toast-warning{ border-left-color:var(--warning); }
+
+/* =========================================================================
+   TAX SUMMARY - estimated federal tax block (Report > Tax tab)
+   ========================================================================= */
+.tax-estimate-block{
+  margin-top:26px;
+  padding-top:20px;
+  border-top:1px solid var(--border);
+}
+.tax-estimate-head{
+  display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;
+  margin-bottom:4px;
+}
+.tax-estimate-head h3{ margin:0; }
+.tax-filing-status-control{ display:flex; align-items:center; gap:8px; }
+.tax-filing-status-control label{
+  font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted);
+}
+.tax-estimate-summary{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
+  gap:14px;
+  margin:14px 0 18px;
+}
+.tax-estimate-stat{
+  background:var(--bg-alt);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:12px 14px;
+}
+.tax-estimate-stat .label{
+  font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted);
+  margin-bottom:4px;
+}
+.tax-estimate-stat .value{ font-size:19px; font-weight:600; color:var(--text-heading); }
+.tax-estimate-stat .value.positive{ color:var(--positive); }
+.tax-estimate-stat .value.negative{ color:var(--negative); }

@@ -1,5 +1,5 @@
 /* =========================================================================
-   budget.js — Page 1: Budget
+   budget.js - Page 1: Budget
    Handles Income -> Deductions -> Investments -> Net Take-Home, and the
    zero-based assignment of that Net Take-Home across groups/line items.
    ========================================================================= */
@@ -20,7 +20,7 @@ const Budget = {
     this.bindPayScheduleForms();
   },
 
-  /* ------------------------- Income strip ------------------------- */
+  /* ---- Income strip ---- */
   async loadIncome() {
     this.incomeSummary = await apiGet(`/api/income?month=${App.currentMonth}`);
     this.renderIncome();
@@ -80,9 +80,14 @@ const Budget = {
     document.getElementById("net-take-home-figure").textContent = formatCurrency(net_take_home);
 
     const monthInfo = document.getElementById("pay-schedule-month-info");
-    monthInfo.textContent = schedule
-      ? `${schedule.payment_count} paycheck${schedule.payment_count === 1 ? "" : "s"} this month (${formatCurrency(schedule.per_check_gross)} each)`
-      : "Set an annual income and a known pay date to get started";
+    if (schedule) {
+      const scheduleNote = schedule.schedules.length > 1
+        ? ` across ${schedule.schedules.length} pay schedules (${schedule.schedules.map((s) => s.name).join(", ")})`
+        : ` (${schedule.schedules[0].name})`;
+      monthInfo.textContent = `${schedule.payment_count} paycheck${schedule.payment_count === 1 ? "" : "s"} this month${scheduleNote}, totaling ${formatCurrency(schedule.gross)}`;
+    } else {
+      monthInfo.textContent = "Add a pay schedule with an annual income and a known pay date to get started";
+    }
 
     // Store the most recent income id so new deduction/investment entries know where to attach.
     this.latestIncomeId = income.length ? income[income.length - 1].id : null;
@@ -90,47 +95,199 @@ const Budget = {
     this.bindIncomeListHandlers();
   },
 
-  /* ------------------------- Pay Schedule ------------------------- */
+  /* ---- Pay Schedule(s) ---- */
   async loadPaySchedule() {
-    this.paySchedule = await apiGet("/api/pay_schedule");
-    this.renderPaySchedule();
+    this.paySchedules = await apiGet("/api/pay_schedules");
+    this.renderPaySchedules();
+    autoExpandIfEmpty("pay-schedule-card", this.paySchedules.length === 0);
   },
 
-  renderPaySchedule() {
-    const s = this.paySchedule;
-    document.getElementById("ps-annual-income").value = s ? s.annual_income : "";
-    document.getElementById("ps-anchor-date").value = s ? s.anchor_date || "" : "";
-    document.getElementById("ps-payments-per-year").value = s ? s.payments_per_year : 26;
-
-    const hasEnd = !!(s && s.end_date);
-    document.getElementById("ps-start-date").value = s ? s.start_date || "" : "";
-    document.getElementById("ps-end-date").value = hasEnd ? s.end_date : "";
-    document.getElementById("ps-ongoing").checked = !hasEnd;
-    document.getElementById("ps-end-date").disabled = !hasEnd;
-
-    const dedList = document.getElementById("ps-deductions-list");
-    const deductions = s ? s.deductions : [];
-    dedList.innerHTML = deductions.map((d) => `
+  /**
+   * Builds one pay-schedule sub-card's HTML -- name, pay details, active
+   * date range, and its own deductions/investments lists. Multiple of
+   * these render stacked in #pay-schedules-wrap, one per job/income
+   * period, each independently editable.
+   */
+  paySchedulesCardHtml(s) {
+    const hasEnd = !!s.end_date;
+    const dedRows = (s.deductions.map((d) => `
       <div class="row" data-id="${d.id}">
         <span class="row-name">${d.name}</span>
         <input type="number" step="0.01" class="edit-ps-deduction" value="${d.amount}" data-id="${d.id}" data-name="${d.name}" />
         <button class="btn-ghost" data-delete-ps-deduction="${d.id}">&times;</button>
       </div>
-    `).join("") || `<div class="row"><span class="hint">None yet</span></div>`;
+    `).join("")) || `<div class="row"><span class="hint">None yet</span></div>`;
 
-    const invList = document.getElementById("ps-investments-list");
-    const investments = s ? s.investments : [];
-    invList.innerHTML = investments.map((inv) => `
+    const invRows = (s.investments.map((inv) => `
       <div class="row ${inv.is_match ? "match-row" : ""}" data-id="${inv.id}">
         <span class="row-name">${inv.name}</span>
         <input type="number" step="0.01" class="edit-ps-investment" value="${inv.amount}" data-id="${inv.id}" data-name="${inv.name}" data-match="${inv.is_match ? "1" : "0"}" />
         <button class="btn-ghost" data-delete-ps-investment="${inv.id}">&times;</button>
       </div>
-    `).join("") || `<div class="row"><span class="hint">None yet</span></div>`;
+    `).join("")) || `<div class="row"><span class="hint">None yet</span></div>`;
 
-    dedList.querySelectorAll(".edit-ps-deduction").forEach((input) => {
+    return `
+      <div class="account-card pay-schedule-item" data-schedule-id="${s.id}">
+        <div class="account-card-head">
+          <input type="text" class="ps-name-input" value="${s.name.replace(/"/g, "&quot;")}" data-id="${s.id}" placeholder="e.g. Acme Corp job" />
+          <div class="account-card-actions">
+            <button type="button" class="btn-ghost" data-delete-schedule="${s.id}">Remove</button>
+          </div>
+        </div>
+
+        <div class="pay-schedule-strip">
+          <div class="pay-schedule-col">
+            <h2>Pay Details</h2>
+            <form class="pay-details-form ps-details-form" data-id="${s.id}">
+              <label>Annual income</label>
+              <input type="number" step="0.01" class="ps-annual-income" value="${s.annual_income}" placeholder="e.g. 78000" />
+              <label>A known pay date</label>
+              <input type="date" class="ps-anchor-date" value="${s.anchor_date || ""}" />
+              <label>Payments per year</label>
+              <input type="number" class="ps-payments-per-year" value="${s.payments_per_year}" />
+              <button type="submit" class="btn">Save</button>
+            </form>
+          </div>
+
+          <div class="pay-schedule-col">
+            <h2>Per-Paycheck Deductions</h2>
+            <div class="ps-deductions-list mini-list">${dedRows}</div>
+            <form class="inline-form ps-deduction-form" data-id="${s.id}">
+              <input type="text" name="name" placeholder="Taxes, insurance..." required />
+              <input type="number" step="0.01" name="amount" placeholder="Amount per check" required />
+              <button type="submit">Add</button>
+            </form>
+
+            <h2 class="pay-schedule-subheading">Active Income Dates</h2>
+            <form class="pay-details-form ps-dates-form" data-id="${s.id}">
+              <label>Start date</label>
+              <input type="date" class="ps-start-date" value="${s.start_date || ""}" />
+              <label>End date</label>
+              <input type="date" class="ps-end-date" value="${hasEnd ? s.end_date : ""}" ${hasEnd ? "" : "disabled"} />
+              <label class="checkbox-label"><input type="checkbox" class="ps-ongoing" ${hasEnd ? "" : "checked"} /> On-going (no end date)</label>
+              <button type="submit" class="btn">Save Dates</button>
+            </form>
+          </div>
+
+          <div class="pay-schedule-col">
+            <h2>Per-Paycheck Investments</h2>
+            <div class="ps-investments-list mini-list">${invRows}</div>
+            <form class="inline-form ps-investment-form" data-id="${s.id}">
+              <input type="text" name="name" placeholder="TSP, 401k..." required />
+              <input type="number" step="0.01" name="amount" placeholder="Amount per check" required />
+              <label class="checkbox-label"><input type="checkbox" name="is_match" /> Employer match</label>
+              <button type="submit">Add</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderPaySchedules() {
+    const wrap = document.getElementById("pay-schedules-wrap");
+    if (!this.paySchedules.length) {
+      wrap.innerHTML = `<p class="hint">No pay schedules yet - add one below for each job/income period.</p>`;
+      return;
+    }
+    wrap.innerHTML = this.paySchedules.map((s) => this.paySchedulesCardHtml(s)).join("");
+    this.bindPayScheduleCards();
+  },
+
+  /**
+   * Binds every form/input/button inside the currently-rendered schedule
+   * cards. Called fresh after each renderPaySchedules() since the whole
+   * #pay-schedules-wrap innerHTML is replaced -- unlike bindPayScheduleForms
+   * (the "Add pay schedule" button), which only needs binding once.
+   */
+  bindPayScheduleCards() {
+    const wrap = document.getElementById("pay-schedules-wrap");
+
+    wrap.querySelectorAll(".ps-name-input").forEach((input) => {
+      input.addEventListener("change", async () => {
+        await apiPut(`/api/pay_schedules/${input.dataset.id}`, { name: input.value.trim() || "Pay Schedule" });
+        await this.loadPaySchedule();
+      });
+    });
+
+    wrap.querySelectorAll("[data-delete-schedule]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Remove this pay schedule and its deductions/investments? This can't be undone.")) return;
+        await apiDelete(`/api/pay_schedules/${btn.dataset.deleteSchedule}`);
+        await this.loadPaySchedule();
+        await this.loadIncome();
+      });
+    });
+
+    wrap.querySelectorAll(".ps-details-form").forEach((form) => {
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const id = form.dataset.id;
+        await apiPut(`/api/pay_schedules/${id}`, {
+          annual_income: parseFloat(form.querySelector(".ps-annual-income").value) || 0,
+          anchor_date: form.querySelector(".ps-anchor-date").value || null,
+          payments_per_year: parseInt(form.querySelector(".ps-payments-per-year").value, 10) || 26,
+        });
+        await this.loadPaySchedule();
+        await this.loadIncome();
+        this.renderAssignTotals();
+      });
+    });
+
+    wrap.querySelectorAll(".ps-dates-form").forEach((form) => {
+      const ongoingCheckbox = form.querySelector(".ps-ongoing");
+      const endInput = form.querySelector(".ps-end-date");
+      ongoingCheckbox.addEventListener("change", () => {
+        endInput.disabled = ongoingCheckbox.checked;
+        if (ongoingCheckbox.checked) endInput.value = "";
+      });
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const id = form.dataset.id;
+        await apiPut(`/api/pay_schedules/${id}`, {
+          start_date: form.querySelector(".ps-start-date").value || null,
+          end_date: ongoingCheckbox.checked ? null : (endInput.value || null),
+        });
+        await this.loadPaySchedule();
+        await this.loadIncome();
+        this.renderAssignTotals();
+      });
+    });
+
+    wrap.querySelectorAll(".ps-deduction-form").forEach((form) => {
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const scheduleId = form.dataset.id;
+        const fd = new FormData(form);
+        await apiPost(`/api/pay_schedules/${scheduleId}/deductions`, {
+          name: fd.get("name"),
+          amount: parseFloat(fd.get("amount")) || 0,
+        });
+        await this.loadPaySchedule();
+        await this.loadIncome();
+        this.renderAssignTotals();
+      });
+    });
+
+    wrap.querySelectorAll(".ps-investment-form").forEach((form) => {
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const scheduleId = form.dataset.id;
+        const fd = new FormData(form);
+        await apiPost(`/api/pay_schedules/${scheduleId}/investments`, {
+          name: fd.get("name"),
+          amount: parseFloat(fd.get("amount")) || 0,
+          is_match: fd.get("is_match") === "on",
+        });
+        await this.loadPaySchedule();
+        await this.loadIncome();
+        this.renderAssignTotals();
+      });
+    });
+
+    wrap.querySelectorAll(".edit-ps-deduction").forEach((input) => {
       input.addEventListener("change", async (e) => {
-        await apiPut(`/api/pay_schedule/deductions/${e.target.dataset.id}`, {
+        await apiPut(`/api/pay_schedule_deductions/${e.target.dataset.id}`, {
           name: e.target.dataset.name,
           amount: parseFloat(e.target.value) || 0,
         });
@@ -138,17 +295,17 @@ const Budget = {
         await this.loadIncome();
       });
     });
-    dedList.querySelectorAll("[data-delete-ps-deduction]").forEach((btn) => {
+    wrap.querySelectorAll("[data-delete-ps-deduction]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        await apiDelete(`/api/pay_schedule/deductions/${btn.dataset.deletePsDeduction}`);
+        await apiDelete(`/api/pay_schedule_deductions/${btn.dataset.deletePsDeduction}`);
         await this.loadPaySchedule();
         await this.loadIncome();
       });
     });
 
-    invList.querySelectorAll(".edit-ps-investment").forEach((input) => {
+    wrap.querySelectorAll(".edit-ps-investment").forEach((input) => {
       input.addEventListener("change", async (e) => {
-        await apiPut(`/api/pay_schedule/investments/${e.target.dataset.id}`, {
+        await apiPut(`/api/pay_schedule_investments/${e.target.dataset.id}`, {
           name: e.target.dataset.name,
           amount: parseFloat(e.target.value) || 0,
           is_match: e.target.dataset.match === "1",
@@ -157,9 +314,9 @@ const Budget = {
         await this.loadIncome();
       });
     });
-    invList.querySelectorAll("[data-delete-ps-investment]").forEach((btn) => {
+    wrap.querySelectorAll("[data-delete-ps-investment]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        await apiDelete(`/api/pay_schedule/investments/${btn.dataset.deletePsInvestment}`);
+        await apiDelete(`/api/pay_schedule_investments/${btn.dataset.deletePsInvestment}`);
         await this.loadPaySchedule();
         await this.loadIncome();
       });
@@ -170,65 +327,8 @@ const Budget = {
     if (this._psBound) return;
     this._psBound = true;
 
-    document.getElementById("pay-schedule-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const s = this.paySchedule || {};
-      await apiPut("/api/pay_schedule", {
-        annual_income: parseFloat(document.getElementById("ps-annual-income").value) || 0,
-        anchor_date: document.getElementById("ps-anchor-date").value || null,
-        payments_per_year: parseInt(document.getElementById("ps-payments-per-year").value, 10) || 26,
-        start_date: s.start_date || null,
-        end_date: s.end_date || null,
-      });
-      await this.loadPaySchedule();
-      await this.loadIncome();
-      this.renderAssignTotals();
-    });
-
-    document.getElementById("ps-deduction-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      await apiPost("/api/pay_schedule/deductions", {
-        name: fd.get("name"),
-        amount: parseFloat(fd.get("amount")) || 0,
-      });
-      e.target.reset();
-      await this.loadPaySchedule();
-      await this.loadIncome();
-      this.renderAssignTotals();
-    });
-
-    document.getElementById("ps-investment-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      await apiPost("/api/pay_schedule/investments", {
-        name: fd.get("name"),
-        amount: parseFloat(fd.get("amount")) || 0,
-        is_match: fd.get("is_match") === "on",
-      });
-      e.target.reset();
-      await this.loadPaySchedule();
-      await this.loadIncome();
-      this.renderAssignTotals();
-    });
-
-    document.getElementById("ps-ongoing").addEventListener("change", (e) => {
-      const endInput = document.getElementById("ps-end-date");
-      endInput.disabled = e.target.checked;
-      if (e.target.checked) endInput.value = "";
-    });
-
-    document.getElementById("ps-dates-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const s = this.paySchedule || {};
-      const ongoing = document.getElementById("ps-ongoing").checked;
-      await apiPut("/api/pay_schedule", {
-        annual_income: s.annual_income || 0,
-        anchor_date: s.anchor_date || null,
-        payments_per_year: s.payments_per_year || 26,
-        start_date: document.getElementById("ps-start-date").value || null,
-        end_date: ongoing ? null : (document.getElementById("ps-end-date").value || null),
-      });
+    document.getElementById("add-pay-schedule-btn").addEventListener("click", async () => {
+      await apiPost("/api/pay_schedules", { name: "New pay schedule" });
       await this.loadPaySchedule();
       await this.loadIncome();
       this.renderAssignTotals();
@@ -292,12 +392,45 @@ const Budget = {
     });
   },
 
-  /* ------------------------- Groups & line items ------------------------- */
+  /* ---- Groups & line items ---- */
   async loadGroupsAndItems() {
     this.groups = await apiGet("/api/budget/groups");
     this.lineItems = await apiGet(`/api/budget/line_items?month=${App.currentMonth}`);
     this.renderGroups();
     this.renderAssignTotals();
+    await this.renderCopyForwardBanner();
+  },
+
+  /**
+   * "Copy last month's budget forward" -- a lower-friction alternative to
+   * Presets for the common case of "this month looks like last month."
+   * Unlike applying a preset (which clears the month first), this only
+   * adds whatever's missing, so it's safe to run after already entering
+   * a few things by hand. Only shown when there's actually something to
+   * offer (last month had line items this month doesn't already have).
+   */
+  async renderCopyForwardBanner() {
+    const banner = document.getElementById("copy-forward-banner");
+    const preview = await apiGet(`/api/budget/copy_forward_preview?month=${App.currentMonth}`);
+    if (!preview) {
+      banner.style.display = "none";
+      return;
+    }
+    banner.style.display = "";
+    banner.innerHTML = `
+      <span>Copy ${preview.count} line item${preview.count === 1 ? "" : "s"} (${formatCurrency(preview.total_planned)} planned) from ${preview.source_month}?</span>
+      <button type="button" class="btn" id="copy-forward-btn">Copy forward</button>
+      <button type="button" class="btn-ghost" id="copy-forward-dismiss-btn">Dismiss</button>
+    `;
+    document.getElementById("copy-forward-btn").addEventListener("click", async () => {
+      const result = await apiPost("/api/budget/copy_forward", { month: App.currentMonth });
+      banner.style.display = "none";
+      await this.loadGroupsAndItems();
+      if (result.copied) showToast(`Copied ${result.copied} line item(s) forward from ${result.source_month}.`, "success");
+    });
+    document.getElementById("copy-forward-dismiss-btn").addEventListener("click", () => {
+      banner.style.display = "none";
+    });
   },
 
   renderGroups() {
@@ -387,7 +520,7 @@ const Budget = {
     unassignedEl.style.color = unassigned < 0 ? "var(--negative)" : "var(--positive)";
   },
 
-  /* ------------------------- Forms (bound once) ------------------------- */
+  /* ---- Forms (bound once) ---- */
   bindForms() {
     if (this._bound) return;
     this._bound = true;
@@ -414,7 +547,7 @@ const Budget = {
     });
   },
 
-  /* ------------------------- Budget Presets ------------------------- */
+  /* ---- Budget Presets ---- */
   async loadPresets() {
     this.presets = await apiGet("/api/budget/presets");
     const select = document.getElementById("preset-select");
@@ -437,13 +570,13 @@ const Budget = {
     const deleteBtn = document.getElementById("preset-delete-btn");
     const saveBtn = document.getElementById("preset-save-btn");
 
-    // Selecting an option only sets the selection — applying and deleting
+    // Selecting an option only sets the selection - applying and deleting
     // are separate, explicit actions below, so choosing a preset can never
     // itself trigger (or accidentally block) either one.
     applyBtn.addEventListener("click", async () => {
       const presetId = select.value;
       if (!presetId) {
-        alert("Select a preset from the dropdown first.");
+        showToast("Select a preset from the dropdown first.", "warning");
         return;
       }
       const preset = this.presets.find((p) => String(p.id) === presetId);
@@ -460,14 +593,14 @@ const Budget = {
         await this.loadGroupsAndItems();
         select.value = "";
       } catch (err) {
-        alert(`Couldn't apply that preset: ${err.message}`);
+        showToast(`Couldn't apply that preset: ${err.message}`, "error");
       }
     });
 
     deleteBtn.addEventListener("click", async () => {
       const presetId = select.value;
       if (!presetId) {
-        alert("Select a preset from the dropdown first.");
+        showToast("Select a preset from the dropdown first.", "warning");
         return;
       }
       const preset = this.presets.find((p) => String(p.id) === presetId);
