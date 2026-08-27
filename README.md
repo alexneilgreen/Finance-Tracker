@@ -18,7 +18,24 @@ Ledger is a personal finance and investment tracker designed as a local desktop 
 
 ## Screenshots / Demo
 
-> _No screenshot available. Add one with: `![Demo](docs/your-image.png)`_
+<p>
+  <img src="demo/Budget-Input.png" width="49%" alt="Budget Input">
+  <img src="demo/Budget-Overview.png" width="49%" alt="Budget Overview">
+</p>
+<p>
+  <img src="demo/Budget-Setup.png" width="49%" alt="Budget Setup">
+  <img src="demo/Track.png" width="49%" alt="Track">
+</p>
+<p>
+  <img src="demo/Track-Imported.png" width="49%" alt="Track Imported">
+  <img src="demo/Track-Investments.png" width="49%" alt="Track Investment">
+</p>
+<p>
+  <img src="demo/Report.png" width="49%" alt="Report">
+  <img src="demo/Generate%20Report.png" width="49%" alt="Generate Report">
+</p>
+
+[View Sample Annual Report PDF](demo/Demo_Annual_Report_2026.pdf)
 
 ---
 
