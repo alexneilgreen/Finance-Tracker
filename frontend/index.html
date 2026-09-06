@@ -37,7 +37,6 @@
       <span class="tab-index">03</span>
       <span class="tab-label">Report</span>
     </button>
-
     <div class="nav-footer">
       <div class="nav-footer-group">
         <label for="global-month">Ledger Month</label>
@@ -182,6 +181,7 @@
             <button type="button" class="tab-toggle-btn" data-tx-action="import">Import</button>
             <button type="button" class="tab-toggle-btn" data-tx-action="search">Search</button>
             <button type="button" class="tab-toggle-btn" data-tx-action="automate">Automate</button>
+            <button type="button" class="tab-toggle-btn" data-tx-action="clear">Clear</button>
           </div>
 
           <div class="tx-action-panel active" id="tx-action-log">
@@ -238,12 +238,29 @@
                 Apply to existing unassigned transactions
               </label>
               <button type="submit">Add rule</button>
+              <button type="button" class="btn-ghost" id="automate-apply-month-btn">Apply Rules to This Month</button>
             </form>
+            <p id="automate-apply-month-status" class="hint"></p>
             <table class="ledger-table" id="automate-rules-table" style="display:none;">
               <thead><tr><th>Pattern</th><th>Line item</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
             <p id="automate-rules-empty" class="hint">No rules yet - add one above.</p>
+          </div>
+
+          <div class="tx-action-panel" id="tx-action-clear">
+            <p class="hint">Permanently removes transactions from the Daily Ledger. This does not touch Sinking Fund contributions, debt payment history, or Net Worth Aggregator entries - only rows in this transaction list.</p>
+            <form id="tx-clear-form" class="inline-form">
+              <input type="date" id="tx-clear-date-from" title="Start date" />
+              <span class="hint">to</span>
+              <input type="date" id="tx-clear-date-to" title="Stop date" />
+              <label class="inline-checkbox-label">
+                <input type="checkbox" id="tx-clear-all-time" />
+                All time
+              </label>
+              <button type="submit" class="btn-danger">Clear transactions</button>
+            </form>
+            <p id="tx-clear-status" class="hint"></p>
           </div>
 
           </div>
@@ -256,12 +273,19 @@
         </div>
 
         <div class="card">
-          <h2>Planned vs. Spent vs. Remaining</h2>
+          <div class="card-header-row">
+            <h2>Planned vs. Spent vs. Remaining</h2>
+            <div class="tab-toggle-bar" id="ledger-summary-toggle" style="margin-bottom:0; border-bottom:none; padding-bottom:0;">
+              <button type="button" class="tab-toggle-btn active" data-view="detailed">Detailed</button>
+              <button type="button" class="tab-toggle-btn" data-view="summary">Summary</button>
+            </div>
+          </div>
           <table class="ledger-table" id="ledger-summary-table">
             <thead>
-              <tr><th>Group</th><th>Line item</th><th class="progress-col">Progress</th><th>Planned</th><th>Spent</th><th>Remaining</th></tr>
+              <tr><th>Group</th><th class="line-item-col">Line item</th><th class="progress-col">Progress</th><th>Planned</th><th>Spent</th><th>Remaining</th></tr>
             </thead>
             <tbody></tbody>
+            <tfoot></tfoot>
           </table>
         </div>
 
@@ -348,7 +372,7 @@
               <option value="aggressive">High</option>
             </select>
           </div>
-          <div class="account-return-metrics" id="portfolio-metrics-figures"></div>
+          <div id="portfolio-metrics-figures"></div>
           <div class="insight-list" id="portfolio-insights-list"></div>
         </div>
         <div class="card" id="networth-chart-card" style="display:none;">

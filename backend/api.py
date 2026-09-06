@@ -429,6 +429,27 @@ def bulk_delete_transactions():
     return jsonify({"deleted": len(ids)}), 200
 
 
+@app.route("/api/transactions/clear/count")
+def count_clear_transactions():
+    """Preview count for the Clear panel - lets the frontend show 'Delete
+    N transactions?' before the person confirms the actual delete below."""
+    date_from = request.args.get("date_from") or None
+    date_to = request.args.get("date_to") or None
+    return jsonify({"count": db.count_transactions_in_range(date_from, date_to)})
+
+
+@app.route("/api/transactions/clear", methods=["POST"])
+def clear_transactions():
+    """Removes every transaction in [date_from, date_to], or all of them if
+    both are omitted ('All time'). Body: { date_from, date_to } (either or
+    both may be null/omitted)."""
+    body = request.get_json() or {}
+    date_from = body.get("date_from") or None
+    date_to = body.get("date_to") or None
+    deleted = db.delete_transactions_in_range(date_from, date_to)
+    return jsonify({"deleted": deleted}), 200
+
+
 @app.route("/api/transactions/import", methods=["POST"])
 def import_transactions():
     if "file" not in request.files:
@@ -478,6 +499,18 @@ def automate_rule_detail(rule_id):
 def automate_rule_apply(rule_id):
     body = request.get_json(silent=True) or {}
     updated = db.apply_description_rule_to_existing(rule_id, only_unassigned=bool(body.get("only_unassigned", True)))
+    return jsonify({"updated": updated})
+
+
+@app.route("/api/automate/rules/apply_to_month", methods=["POST"])
+def automate_rules_apply_to_month():
+    """Runs every existing Automate rule against one Ledger Month's
+    transactions at once. Body: { month: 'YYYY-MM', only_unassigned }."""
+    body = request.get_json(silent=True) or {}
+    month = body.get("month")
+    if not month:
+        return jsonify({"error": "A month is required."}), 400
+    updated = db.apply_all_rules_to_month(month, only_unassigned=bool(body.get("only_unassigned", True)))
     return jsonify({"updated": updated})
 
 

@@ -224,8 +224,14 @@ def _draw_donut(ax, groups, net_take_home):
         return
 
     labels = [g["group"] for g in groups]
-    budgeted = [g["planned"] for g in groups]
-    spent = [g["spent"] for g in groups]
+    # A group whose only transactions this month were refunds/credits can
+    # have a negative net "Spent" (see the app's refund convention) - and a
+    # negative "Planned" is possible too if the person entered one. Neither
+    # is a valid pie wedge size, so clamp per-group values to zero here;
+    # this only affects the donut's shape, not the raw numbers shown in the
+    # Budget Adherence table below it.
+    budgeted = [max(g["planned"], 0.0) for g in groups]
+    spent = [max(g["spent"], 0.0) for g in groups]
     colors = [PALETTE[i % len(PALETTE)] for i in range(len(groups))]
 
     unbudgeted = max(net_take_home - sum(budgeted), 0)

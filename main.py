@@ -8,9 +8,11 @@ Entry point for the Personal Finance & Investment Tracker.
 3. On window close, copies the SQLite file to data/backups/ with a timestamp.
 
 Run with:  python main.py
+Run with debug tools:  python main.py --debug
 Package with:  pyinstaller --noconfirm --onefile --add-data "frontend:frontend" main.py
 """
 
+import argparse
 import base64
 import shutil
 import socket
@@ -89,7 +91,23 @@ class JSApi:
             return {"saved": False, "error": str(e)}
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Personal Finance & Investment Tracker")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Prints the local server URL (so the app can also be opened in a "
+            "normal browser tab for full DevTools) and enables PyWebView's "
+            "native right-click Inspect option."
+        ),
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     db.init_db()
 
     # Belt-and-suspenders: PyWebView blocks native browser-style downloads by
@@ -102,6 +120,12 @@ def main():
     server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
     server_thread.start()
     time.sleep(0.6)  # give Flask a moment to bind before the window loads it
+
+    if args.debug:
+        # The PyWebView window itself is chromeless (no F12), so this prints
+        # the same running app's URL for opening in a normal browser tab
+        # with full DevTools instead.
+        print(f"[debug] App is also reachable at: http://{HOST}:{port}/")
 
     js_api = JSApi()
     window = webview.create_window(
@@ -116,7 +140,7 @@ def main():
     js_api.set_window(window)
     window.events.closed += backup_database
 
-    webview.start()
+    webview.start(debug=args.debug)
 
 
 if __name__ == "__main__":

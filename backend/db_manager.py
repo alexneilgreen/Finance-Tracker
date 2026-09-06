@@ -1857,6 +1857,39 @@ def apply_description_rule_to_existing(rule_id, only_unassigned=True):
         return updated
 
 
+def apply_all_rules_to_month(month, only_unassigned=True):
+    """Runs every existing Automate rule against one Ledger Month's
+    transactions in a single pass -- the "Apply Rules to This Month" button
+    on the Automate panel, for catching a month's worth of rows against
+    rules that were added or edited after that month was already imported.
+
+    Each transaction is checked against every rule (longest pattern first,
+    same precedence as ordinary auto-categorization - see
+    _lookup_description_rule) and updated on the first match. Returns how
+    many transactions changed."""
+    rules = get_description_rules()
+    if not rules:
+        return 0
+
+    with get_conn() as conn:
+        query = "SELECT id, date, description FROM transactions WHERE strftime('%Y-%m', date) = ?"
+        params = [month]
+        if only_unassigned:
+            query += " AND line_item_id IS NULL"
+        rows = conn.execute(query, params).fetchall()
+
+        updated = 0
+        for row in rows:
+            rule = _lookup_description_rule(rules, row["description"])
+            if not rule:
+                continue
+            line_item_id = _find_or_create_line_item(conn, rule["group_name"], rule["item_name"], row["date"][:7])
+            conn.execute("UPDATE transactions SET line_item_id = ? WHERE id = ?", (line_item_id, row["id"]))
+            updated += 1
+        conn.commit()
+        return updated
+
+
 def import_account_csv(account_id, csv_text):
     """Imports contributions/valuations for one Net Worth Aggregator account.
     Expected columns: Date, Type, Amount -- Type is 'Contribution' or
@@ -2316,6 +2349,45 @@ def bulk_delete_transactions(ids):
         placeholders = ",".join("?" * len(ids))
         conn.execute(f"DELETE FROM transactions WHERE id IN ({placeholders})", ids)
         conn.commit()
+
+
+def _transaction_range_where(date_from=None, date_to=None):
+    """Shared WHERE-clause builder for the Clear panel's count/delete pair,
+    so the number the person previews always matches what actually gets
+    removed. Both bounds are inclusive; passing neither means "all time"."""
+    clauses = []
+    params = []
+    if date_from:
+        clauses.append("date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("date <= ?")
+        params.append(date_to)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
+def count_transactions_in_range(date_from=None, date_to=None):
+    """Counts transactions in [date_from, date_to] (inclusive), or every
+    transaction if both are omitted. Used to show the person exactly how
+    many rows a Clear will remove before they confirm it."""
+    where, params = _transaction_range_where(date_from, date_to)
+    with get_conn() as conn:
+        row = conn.execute(f"SELECT COUNT(*) AS n FROM transactions {where}", params).fetchone()
+        return row["n"]
+
+
+def delete_transactions_in_range(date_from=None, date_to=None):
+    """Deletes every transaction in [date_from, date_to] (inclusive), or
+    literally all transactions if both are omitted (the "All time" Clear
+    option). Nothing else references transactions.id as a foreign key, so
+    this is a plain range delete - no cascading cleanup needed. Returns the
+    number of rows removed."""
+    where, params = _transaction_range_where(date_from, date_to)
+    with get_conn() as conn:
+        cur = conn.execute(f"DELETE FROM transactions {where}", params)
+        conn.commit()
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------------------

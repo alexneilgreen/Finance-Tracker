@@ -3,6 +3,7 @@
    ========================================================================= */
 
 const Track = {
+  ledgerSummaryView: "detailed",
   lineItemsForMonth: [],
   accountsChart: null,
   accountsChartYear: null,
@@ -39,8 +40,11 @@ const Track = {
     this.bindBulkToolbar();
     this.bindTxSearchForm();
     this.bindTxActionToggle();
+    this.bindLedgerSummaryToggle(); // <-- Add this
     this.bindAutomateForm();
     this.bindSplitModal();
+    this.bindClearForm();
+    this.bindAutomateApplyMonthButton();
     autoExpandIfEmpty("tx-actions-card", (this.lastTransactions || []).length === 0);
   },
 
@@ -149,6 +153,110 @@ const Track = {
         }
       } catch (err) {
         showToast(`Couldn't save that rule: ${err.message}`, "error");
+      }
+    });
+  },
+
+  /* ---- Automate: run every existing rule against the current Ledger
+     Month in one pass - catches rows imported before a rule existed, or
+     before it was edited, without re-triggering a full CSV re-import. ---- */
+  bindAutomateApplyMonthButton() {
+    const btn = document.getElementById("automate-apply-month-btn");
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = "true";
+
+    btn.addEventListener("click", async () => {
+      const month = App.currentMonth;
+      const status = document.getElementById("automate-apply-month-status");
+      const rules = await apiGet("/api/automate/rules");
+      if (!rules.length) {
+        showToast("No Automate rules to apply yet - add one above.", "warning");
+        return;
+      }
+      if (!confirm(`Apply all ${rules.length} Automate rule${rules.length === 1 ? "" : "s"} to every unassigned transaction in ${month}?`)) return;
+
+      btn.disabled = true;
+      status.textContent = "Applying...";
+      try {
+        const result = await apiPost("/api/automate/rules/apply_to_month", { month, only_unassigned: true });
+        status.textContent = "";
+        showToast(`Categorized ${result.updated} transaction${result.updated === 1 ? "" : "s"} in ${month}.`, result.updated ? "success" : "info");
+        if (result.updated) {
+          await this.renderTransactions();
+          await this.renderLedgerSummary();
+        }
+      } catch (err) {
+        showToast(`Couldn't apply rules: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  },
+
+  /* ---- Clear: bulk-remove transactions by date range, or all time ---- */
+  bindClearForm() {
+    const form = document.getElementById("tx-clear-form");
+    if (form.dataset.bound) return;
+    form.dataset.bound = "true";
+
+    const allTimeCheckbox = document.getElementById("tx-clear-all-time");
+    const fromInput = document.getElementById("tx-clear-date-from");
+    const toInput = document.getElementById("tx-clear-date-to");
+    const status = document.getElementById("tx-clear-status");
+
+    allTimeCheckbox.addEventListener("change", () => {
+      fromInput.disabled = allTimeCheckbox.checked;
+      toInput.disabled = allTimeCheckbox.checked;
+      if (allTimeCheckbox.checked) {
+        fromInput.value = "";
+        toInput.value = "";
+      }
+    });
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const allTime = allTimeCheckbox.checked;
+      const dateFrom = allTime ? null : (fromInput.value || null);
+      const dateTo = allTime ? null : (toInput.value || null);
+
+      if (!allTime && !dateFrom && !dateTo) {
+        showToast('Pick a start and/or stop date, or check "All time".', "warning");
+        return;
+      }
+      if (!allTime && dateFrom && dateTo && dateFrom > dateTo) {
+        showToast("Start date must be on or before the stop date.", "warning");
+        return;
+      }
+
+      const params = new URLSearchParams();
+      if (dateFrom) params.set("date_from", dateFrom);
+      if (dateTo) params.set("date_to", dateTo);
+      const { count } = await apiGet(`/api/transactions/clear/count?${params.toString()}`);
+
+      if (count === 0) {
+        status.textContent = "No transactions match that range.";
+        return;
+      }
+
+      const rangeLabel = !dateFrom && !dateTo
+        ? "all time"
+        : `${dateFrom || "the beginning"} through ${dateTo || "today"}`;
+      const confirmMsg = allTime
+        ? `Permanently delete ALL ${count} transaction${count === 1 ? "" : "s"}, for all time? This can't be undone.`
+        : `Delete ${count} transaction${count === 1 ? "" : "s"} from ${rangeLabel}? This can't be undone.`;
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const result = await apiPost("/api/transactions/clear", { date_from: dateFrom, date_to: dateTo });
+        showToast(`Cleared ${result.deleted} transaction${result.deleted === 1 ? "" : "s"}.`, "success");
+        status.textContent = "";
+        form.reset();
+        fromInput.disabled = false;
+        toInput.disabled = false;
+        await this.renderTransactions();
+        await this.renderLedgerSummary();
+      } catch (err) {
+        showToast(`Couldn't clear transactions: ${err.message}`, "error");
       }
     });
   },
@@ -284,8 +392,34 @@ const Track = {
 
   async renderLedgerSummary() {
     const summary = await apiGet(`/api/ledger_summary?month=${App.currentMonth}`);
+
+    let displayData = summary;
+    const table = document.getElementById("ledger-summary-table");
+
+    if (this.ledgerSummaryView === "summary") {
+      table.classList.add("summary-view");
+      const groups = {};
+      summary.forEach(li => {
+        if (!groups[li.group_name]) {
+          groups[li.group_name] = {
+            group_name: li.group_name,
+            name: "",
+            planned_amount: 0,
+            spent: 0,
+            remaining: 0
+          };
+        }
+        groups[li.group_name].planned_amount += li.planned_amount;
+        groups[li.group_name].spent += li.spent;
+        groups[li.group_name].remaining += li.remaining;
+      });
+      displayData = Object.values(groups);
+    } else {
+      table.classList.remove("summary-view");
+    }
+
     const tbody = document.querySelector("#ledger-summary-table tbody");
-    tbody.innerHTML = summary.map((li) => {
+    tbody.innerHTML = displayData.map((li) => {
       const hasPlan = li.planned_amount > 0;
       const pct = hasPlan ? (li.spent / li.planned_amount) * 100 : 0;
       const barColor = pct > 100 ? "var(--negative)" : pct >= 90 ? "var(--warning)" : "var(--positive)";
@@ -295,16 +429,35 @@ const Track = {
       return `
         <tr>
           <td>${li.group_name}</td>
-          <td>${li.name}</td>
+          <td class="line-item-col">${li.name}</td>
           <td class="progress-col">${progressCell}</td>
           <td class="num">${formatCurrency(li.planned_amount)}</td>
           <td class="num">${formatCurrency(li.spent)}</td>
           <td class="num ${li.remaining < 0 ? "negative" : "positive"}">${formatCurrency(li.remaining)}</td>
         </tr>
       `;
-    }).join("") || `<tr><td colspan="6" class="hint">No line items for this month yet - set up your budget first.</td></tr>`;
+    }).join("") || `<tr><td colspan="${this.ledgerSummaryView === 'summary' ? 5 : 6}" class="hint">No line items for this month yet - set up your budget first.</td></tr>`;
 
     animateBarFills(tbody.querySelectorAll(".progress-bar-fill"));
+
+    const tfoot = document.querySelector("#ledger-summary-table tfoot");
+    if (!summary.length) {
+      tfoot.innerHTML = "";
+      return;
+    }
+    const totalPlanned = summary.reduce((sum, li) => sum + li.planned_amount, 0);
+    const totalSpent = summary.reduce((sum, li) => sum + li.spent, 0);
+    const totalRemaining = totalPlanned - totalSpent;
+    const colSpan = this.ledgerSummaryView === "summary" ? 2 : 3;
+
+    tfoot.innerHTML = `
+      <tr>
+        <td colspan="${colSpan}">Total</td>
+        <td class="num">${formatCurrency(totalPlanned)}</td>
+        <td class="num">${formatCurrency(totalSpent)}</td>
+        <td class="num ${totalRemaining < 0 ? "negative" : "positive"}">${formatCurrency(totalRemaining)}</td>
+      </tr>
+    `;
   },
 
   /**
@@ -935,6 +1088,20 @@ const Track = {
     });
   },
 
+  bindLedgerSummaryToggle() {
+    const bar = document.getElementById("ledger-summary-toggle");
+    if (!bar || bar.dataset.bound) return;
+    bar.dataset.bound = "true";
+    bar.querySelectorAll(".tab-toggle-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        bar.querySelectorAll(".tab-toggle-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        this.ledgerSummaryView = btn.dataset.view;
+        this.renderLedgerSummary();
+      });
+    });
+  },
+
   /* =======================================================================
      TAB B - Sinking Funds & Goals
      ======================================================================= */
@@ -1010,39 +1177,70 @@ const Track = {
           legend: { labels: { color: "#E9E4D8", font: { family: "Inter" } } },
           tooltip: { callbacks: { label: (item) => `${item.dataset.label}: ${formatCurrency(item.raw)}` } },
         },
-        onHover: (evt, _elements, chart) => {
-          const inLabelGutter = this.fundLabelIndexAtEvent(chart, evt) !== null;
-          canvas.style.cursor = inLabelGutter ? "pointer" : "default";
-        },
-        onClick: (evt, _elements, chart) => {
-          const index = this.fundLabelIndexAtEvent(chart, evt);
-          if (index === null || index >= funds.length) return;
-          this.excludedFundIds.add(funds[index].id);
-          this.renderFundsOverviewChart(this.lastFundsForChart);
-        },
+        // NOTE: onHover/onClick are intentionally NOT set here. On this
+        // canvas, Chart.js's own click dispatch was confirmed (via live
+        // debugging) to never invoke options.onClick on a real mouse
+        // click, even though a plain addEventListener("click", ...) on
+        // the exact same canvas fires every time with correct
+        // coordinates, and manually invoking a would-be onClick callback
+        // worked fine. Rather than depend on Chart.js's internal event
+        // routing (whatever is swallowing it there), the label-gutter
+        // click/hover handling below is wired directly to the canvas
+        // element instead, reusing Chart.js's own coordinate-conversion
+        // helper (getRelativePosition) so the hit-testing math is
+        // unchanged - only the event source moved.
       },
     });
+
+    if (!canvas.dataset.fundsClickBound) {
+      canvas.dataset.fundsClickBound = "true";
+
+      canvas.addEventListener("mousemove", (e) => {
+        const chart = this.fundsOverviewChart;
+        if (!chart) return;
+        const pos = Chart.helpers.getRelativePosition(e, chart);
+        const inLabelGutter = this.fundLabelIndexAtEvent(chart, pos) !== null;
+        canvas.style.cursor = inLabelGutter ? "pointer" : "default";
+      });
+
+      canvas.addEventListener("click", (e) => {
+        const chart = this.fundsOverviewChart;
+        if (!chart) return;
+        const pos = Chart.helpers.getRelativePosition(e, chart);
+        const index = this.fundLabelIndexAtEvent(chart, pos);
+        if (index === null) return;
+        const currentFunds = (this.lastFundsForChart || []).filter((f) => !this.excludedFundIds.has(f.id));
+        if (index >= currentFunds.length) return;
+        this.excludedFundIds.add(currentFunds[index].id);
+        this.renderFundsOverviewChart(this.lastFundsForChart);
+      });
+    }
   },
 
   /**
    * Returns the fund index whose Y-axis label the event is over, or null.
-   * Bounded to the y-scale's own box (yScale.left/right/top/bottom) rather
-   * than just "left of the plot area", since that alone has no vertical
-   * bound and can misfire on clicks up in the legend row. The index itself
-   * is computed as a direct proportion of the scale's own height rather
-   * than via Chart.js's scale.getValueForPixel(), which for a category
-   * scale used as a horizontal bar chart's index axis doesn't reliably
-   * account for the per-category band offset and can return the wrong
-   * index (or nothing at all).
+   * Originally bounded against the y-scale's own reported box
+   * (yScale.left/right/top/bottom), but that box isn't reliable for this
+   * purpose in Chart.js 4.x - a category scale's left/right sometimes
+   * collapses to a sliver flush with the plot area rather than the full
+   * label-text gutter, so clicks on the actual label text landed just
+   * outside the bounds check and silently did nothing.
+   *
+   * Bounding against chart.chartArea instead is reliable: chartArea is
+   * always the exact rectangle the bars are plotted in, computed the same
+   * way regardless of scale/label quirks. Since the y-axis sits to the
+   * left of the plot with nothing else out there, any click left of
+   * chartArea.left (and within its vertical range) is unambiguously a
+   * click in the label gutter - no need to trust the scale's own box.
    */
   fundLabelIndexAtEvent(chart, evt) {
     if (evt.x === null || evt.y === null) return null;
-    const yScale = chart.scales.y;
-    if (evt.x < yScale.left || evt.x > yScale.right) return null;
-    if (evt.y < yScale.top || evt.y > yScale.bottom) return null;
+    const area = chart.chartArea;
+    if (evt.x >= area.left) return null;
+    if (evt.y < area.top || evt.y > area.bottom) return null;
     const count = chart.data.labels.length;
     if (!count) return null;
-    const index = Math.floor(((evt.y - yScale.top) / (yScale.bottom - yScale.top)) * count);
+    const index = Math.floor(((evt.y - area.top) / (area.bottom - area.top)) * count);
     return Math.min(Math.max(index, 0), count - 1);
   },
 
