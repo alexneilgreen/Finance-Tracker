@@ -616,27 +616,24 @@ const Budget = {
   },
 
   openSavePresetModal() {
-    const modal = document.getElementById("save-preset-modal");
     const nameInput = document.getElementById("save-preset-name");
-    const statusEl = document.getElementById("save-preset-status");
-    nameInput.value = "";
-    statusEl.textContent = "";
-    modal.classList.add("open");
+    ModalManager.open("save-preset-modal");
     nameInput.focus();
   },
 
   bindSavePresetModal() {
-    const modal = document.getElementById("save-preset-modal");
     const nameInput = document.getElementById("save-preset-name");
     const statusEl = document.getElementById("save-preset-status");
     const cancelBtn = document.getElementById("save-preset-cancel");
     const confirmBtn = document.getElementById("save-preset-confirm");
 
-    const close = () => modal.classList.remove("open");
-    cancelBtn.addEventListener("click", close);
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) close();
+    ModalManager.register("save-preset-modal", {
+      onOpen: () => {
+        nameInput.value = "";
+        statusEl.textContent = "";
+      },
     });
+    cancelBtn.addEventListener("click", () => ModalManager.close("save-preset-modal"));
 
     confirmBtn.addEventListener("click", async () => {
       const name = nameInput.value.trim();
@@ -655,7 +652,7 @@ const Budget = {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `Server returned ${res.status}`);
         await this.loadPresets();
-        close();
+        ModalManager.close("save-preset-modal");
       } catch (err) {
         statusEl.textContent = err.message;
       } finally {

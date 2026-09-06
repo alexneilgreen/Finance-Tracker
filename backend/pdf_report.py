@@ -121,6 +121,57 @@ def _draw_page_chrome(fig, year, kicker, page_num, total_pages):
     fig.text(0.94, 0.015, f"Page {page_num} of {total_pages}", fontsize=7.5, color=TEXT_MUTED, ha="right", va="bottom")
 
 
+class PageBuilder:
+    """Wraps the setup/teardown every _build_*_page function used to repeat:
+    create a white-background figure at the right orientation, optionally
+    stamp the serif suptitle, and - once the page's own content has been
+    drawn - stamp the running header/footer chrome, hand the figure to
+    PdfPages, and close it.
+
+    This only owns that shared scaffolding. Every page's actual chart or
+    table drawing (_draw_donut, _draw_sankey, the _draw_*_table helpers,
+    _draw_metric_explanation_block, etc.) is untouched - each _build_*_page
+    function still calls those directly on the axes this class hands back,
+    exactly as before. Nothing about how a chart is drawn changes here,
+    only how the page around it is assembled and closed out.
+    """
+
+    PORTRAIT = (8.5, 11)
+    LANDSCAPE = (11, 8.5)
+
+    def __init__(self, pdf, year, total_pages, orientation="portrait"):
+        self.pdf = pdf
+        self.year = year
+        self.total_pages = total_pages
+        figsize = self.PORTRAIT if orientation == "portrait" else self.LANDSCAPE
+        self.fig = plt.figure(figsize=figsize)
+        self.fig.patch.set_facecolor("white")
+
+    def suptitle(self, text, fontsize=18, y=0.97):
+        self.fig.suptitle(text, fontsize=fontsize, color=TEXT_DARK, family="serif", y=y)
+        return self
+
+    def full_axes(self, rect=(0.08, 0.04, 0.86, 0.89), axis_off=True):
+        """The single full-bleed text/table axes shared by the tax summary,
+        investment insights, and both metric-definition explanation pages.
+        `rect` is [left, bottom, width, height] in figure fraction, same as
+        the fig.add_axes(...) calls this replaces."""
+        ax = self.fig.add_axes(list(rect))
+        if axis_off:
+            ax.axis("off")
+        return ax
+
+    def finish(self, page_num, kicker):
+        """Stamps page chrome, hands the figure to PdfPages, and closes it -
+        the three-line tail (_draw_page_chrome + pdf.savefig + plt.close)
+        every _build_*_page function used to repeat verbatim."""
+        _draw_page_chrome(self.fig, self.year, kicker, page_num, self.total_pages)
+        self.pdf.savefig(self.fig, facecolor="white")
+        plt.close(self.fig)
+
+
+
+
 def _compute_year_in_review_stats(year, accounts):
     """Headline year-in-review numbers for the cover page -- computed from
     the same data sources (and the same _year_dates/_account_value_at
@@ -154,8 +205,8 @@ def _compute_year_in_review_stats(year, accounts):
 
 
 def _build_cover_page(pdf, year, stats, generated_on):
-    fig = plt.figure(figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
+    pb = PageBuilder(pdf, year, total_pages=None, orientation="portrait")
+    fig = pb.fig
     ax = fig.add_axes([0, 0, 1, 1])
     ax.axis("off")
     ax.set_xlim(0, 1)
@@ -196,10 +247,9 @@ def _build_toc_page(pdf, year, entries, total_pages):
     right-aligned page number) since matplotlib has no native "leader"
     primitive -- a fixed-width font keeps the dots and numbers lined up
     cleanly without needing to measure rendered text width."""
-    fig = plt.figure(figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
-    fig.suptitle("Table of Contents", fontsize=18, color=TEXT_DARK, family="serif", y=0.90)
-    ax = fig.add_axes([0.12, 0.15, 0.76, 0.65])
+    pb = PageBuilder(pdf, year, total_pages, orientation="portrait")
+    pb.suptitle("Table of Contents", y=0.90)
+    ax = pb.fig.add_axes([0.12, 0.15, 0.76, 0.65])
     ax.axis("off")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -211,9 +261,7 @@ def _build_toc_page(pdf, year, entries, total_pages):
         dots = "." * max(3, line_width - len(title) - len(num_str))
         ax.text(0, y, f"{title}{dots}{num_str}", fontsize=12, color=TEXT_DARK, family="monospace", va="top")
 
-    _draw_page_chrome(fig, year, None, 2, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(2, None)
 
 
 def _draw_donut(ax, groups, net_take_home):
@@ -387,9 +435,9 @@ def _build_month_page(pdf, year, month, page_num, total_pages, kicker):
     groups = db.get_monthly_spending_report(month_str)
     flow = db.get_budget_flow(month_str)
 
-    fig = plt.figure(figsize=(11, 8.5))
-    fig.patch.set_facecolor("white")
-    fig.suptitle(f"{month_name} {year}", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
+    pb = PageBuilder(pdf, year, total_pages, orientation="landscape")
+    fig = pb.fig
+    pb.suptitle(f"{month_name} {year}")
 
     gs = fig.add_gridspec(2, 2, height_ratios=[1.1, 1], width_ratios=[0.5875, 1.4125],
                            hspace=0.55, wspace=0.35,
@@ -409,9 +457,7 @@ def _build_month_page(pdf, year, month, page_num, total_pages, kicker):
         ax_sankey.text(0.5, 0.5, "No income logged for this month.",
                         ha="center", va="center", color=TEXT_MUTED, fontsize=9)
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def _build_annual_charts_page(pdf, year, accounts, page_num, total_pages, kicker):
@@ -424,9 +470,10 @@ def _build_annual_charts_page(pdf, year, accounts, page_num, total_pages, kicker
 
     # Portrait rather than the month pages' landscape orientation - three
     # stacked charts need more vertical room than a landscape page gives.
-    fig, (ax_trend, ax_net_worth, ax_by_account) = plt.subplots(3, 1, figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
-    fig.suptitle(f"{year} - Annual Trend & Net Worth", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
+    pb = PageBuilder(pdf, year, total_pages, orientation="portrait")
+    fig = pb.fig
+    ax_trend, ax_net_worth, ax_by_account = fig.subplots(3, 1)
+    pb.suptitle(f"{year} - Annual Trend & Net Worth")
     fig.subplots_adjust(left=0.10, right=0.94, top=0.91, bottom=0.09, hspace=0.6)
 
     # ---- Annual Trend (spending by group, across all 12 months) ----
@@ -506,9 +553,7 @@ def _build_annual_charts_page(pdf, year, accounts, page_num, total_pages, kicker
         ax_by_account.text(0.5, 0.5, f"No account activity in {year}", ha="center", va="center", color=TEXT_MUTED)
     _style_axes(ax_by_account)
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def _build_comparison_page(pdf, year, page_num, total_pages, kicker):
@@ -522,9 +567,10 @@ def _build_comparison_page(pdf, year, page_num, total_pages, kicker):
     savings_rows = db.get_savings_rate_series(year)
     month_labels = [calendar.month_abbr[m] for m in range(1, 13)]
 
-    fig, (ax_multi, ax_savings) = plt.subplots(2, 1, figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
-    fig.suptitle(f"{year} - Multi-Year Comparison & Savings Rate", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
+    pb = PageBuilder(pdf, year, total_pages, orientation="portrait")
+    fig = pb.fig
+    ax_multi, ax_savings = fig.subplots(2, 1)
+    pb.suptitle(f"{year} - Multi-Year Comparison & Savings Rate")
     fig.subplots_adjust(left=0.10, right=0.94, top=0.91, bottom=0.08, hspace=0.35)
 
     # ---- Multi-Year Comparison ----
@@ -569,9 +615,7 @@ def _build_comparison_page(pdf, year, page_num, total_pages, kicker):
         ax_savings.text(0.5, 0.5, f"No income logged in {year}", ha="center", va="center", color=TEXT_MUTED)
     _style_axes(ax_savings)
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def _draw_risk_metrics_table(ax, accounts_with_metrics):
@@ -668,16 +712,13 @@ def _build_metrics_table_page(pdf, year, accounts, page_num, total_pages, kicker
         if a.get("metrics") and a["metrics"].get("num_return_periods")
     ]
 
-    fig = plt.figure(figsize=(11, 8.5))
-    fig.patch.set_facecolor("white")
-    fig.suptitle("Investment Return & Risk Metrics", fontsize=18, color=TEXT_DARK, family="serif", y=0.95)
+    pb = PageBuilder(pdf, year, total_pages, orientation="landscape")
+    pb.suptitle("Investment Return & Risk Metrics", y=0.95)
 
-    ax = fig.add_axes([0.05, 0.08, 0.9, 0.8])
+    ax = pb.fig.add_axes([0.05, 0.08, 0.9, 0.8])
     _draw_risk_metrics_table(ax, accounts_with_metrics)
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def _build_return_metrics_explanations_page(pdf, year, page_num, total_pages, kicker):
@@ -705,19 +746,15 @@ def _build_return_metrics_explanations_page(pdf, year, page_num, total_pages, ki
          "TWRR = \u220f (1 + r\u1d62) \u2212 1,   r\u1d62 = (End\u1d62 \u2212 Contrib\u1d62 \u2212 Start\u1d62) / Start\u1d62,  annualized over the full history"),
     ]
 
-    fig = plt.figure(figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
-    fig.suptitle("Return Metric Definitions", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
-    ax = fig.add_axes([0.08, 0.04, 0.86, 0.89])
-    ax.axis("off")
+    pb = PageBuilder(pdf, year, total_pages, orientation="portrait")
+    pb.suptitle("Return Metric Definitions")
+    ax = pb.full_axes()
 
     y = 0.99
     for title, desc, formula in explanations:
         y = _draw_metric_explanation_block(ax, y, title, desc, formula)
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def _build_risk_metrics_explanations_page(pdf, year, page_num, total_pages, kicker):
@@ -740,19 +777,15 @@ def _build_risk_metrics_explanations_page(pdf, year, page_num, total_pages, kick
          "Duration = Trough Date \u2212 Peak Date      Recovery Time = Recovery Date \u2212 Trough Date"),
     ]
 
-    fig = plt.figure(figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
-    fig.suptitle("Risk Metric Definitions", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
-    ax = fig.add_axes([0.08, 0.04, 0.86, 0.89])
-    ax.axis("off")
+    pb = PageBuilder(pdf, year, total_pages, orientation="portrait")
+    pb.suptitle("Risk Metric Definitions")
+    ax = pb.full_axes()
 
     y = 0.99
     for title, desc, formula in explanations:
         y = _draw_metric_explanation_block(ax, y, title, desc, formula)
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def _severity_color(severity):
@@ -798,11 +831,9 @@ def _build_investment_insights_page(pdf, year, portfolio, accounts_with_insights
     growth-of-$1 pool across every account, not a weighted average of
     per-account metrics) and for each account with enough history. See
     generate_investment_insights() in db_manager.py."""
-    fig = plt.figure(figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
-    fig.suptitle("Investment Insights", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
-    ax = fig.add_axes([0.08, 0.04, 0.86, 0.89])
-    ax.axis("off")
+    pb = PageBuilder(pdf, year, total_pages, orientation="portrait")
+    pb.suptitle("Investment Insights")
+    ax = pb.full_axes()
 
     y = 0.99
     if portfolio:
@@ -818,9 +849,7 @@ def _build_investment_insights_page(pdf, year, portfolio, accounts_with_insights
         ax.text(0, dy, line, fontsize=8, color=TEXT_MUTED, va="bottom", style="italic")
         dy -= 0.018
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def _fmt_range(floor, ceiling):
@@ -947,11 +976,9 @@ def _build_tax_summary_page(pdf, year, tax_data, page_num, total_pages, kicker):
     breakdown). generate_annual_report() skips this page entirely when
     tax_data is None (no income logged for the year), same condition
     get_year_end_tax_summary() itself uses."""
-    fig = plt.figure(figsize=(8.5, 11))
-    fig.patch.set_facecolor("white")
-    fig.suptitle(f"{year} - Year-End Tax Summary", fontsize=18, color=TEXT_DARK, family="serif", y=0.97)
-    ax = fig.add_axes([0.08, 0.05, 0.86, 0.87])
-    ax.axis("off")
+    pb = PageBuilder(pdf, year, total_pages, orientation="portrait")
+    pb.suptitle(f"{year} - Year-End Tax Summary")
+    ax = pb.full_axes(rect=(0.08, 0.05, 0.86, 0.87))
 
     y = _draw_tax_source_table(ax, tax_data["sources"], tax_data["totals"])
     estimate = tax_data["estimate"]
@@ -968,9 +995,7 @@ def _build_tax_summary_page(pdf, year, tax_data, page_num, total_pages, kicker):
         ax.text(0, dy, line, fontsize=8, color=TEXT_MUTED, va="top", style="italic")
         dy -= 0.02
 
-    _draw_page_chrome(fig, year, kicker, page_num, total_pages)
-    pdf.savefig(fig, facecolor="white")
-    plt.close(fig)
+    pb.finish(page_num, kicker)
 
 
 def generate_annual_report(year):

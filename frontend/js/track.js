@@ -738,7 +738,7 @@ const Track = {
     this.addSplitRow(tx.amount / 2, tx.description);
     this.addSplitRow(tx.amount / 2, tx.description);
     this.updateSplitRemaining();
-    document.getElementById("split-tx-modal").classList.add("open");
+    ModalManager.open("split-tx-modal");
   },
 
   addSplitRow(amount, description) {
@@ -781,13 +781,11 @@ const Track = {
     if (this._splitModalBound) return;
     this._splitModalBound = true;
 
-    const modal = document.getElementById("split-tx-modal");
     const statusEl = document.getElementById("split-tx-status");
     const confirmBtn = document.getElementById("split-tx-confirm");
-    const close = () => modal.classList.remove("open");
 
-    document.getElementById("split-tx-cancel").addEventListener("click", close);
-    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+    ModalManager.register("split-tx-modal");
+    document.getElementById("split-tx-cancel").addEventListener("click", () => ModalManager.close("split-tx-modal"));
     document.getElementById("split-tx-add-row-btn").addEventListener("click", () => this.addSplitRow(0, this.splitTxOriginal.description));
 
     confirmBtn.addEventListener("click", async () => {
@@ -808,7 +806,7 @@ const Track = {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `Server returned ${res.status}`);
-        close();
+        ModalManager.close("split-tx-modal");
         await this.renderLedgerSummary();
         await this.renderTransactions();
       } catch (err) {

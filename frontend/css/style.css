@@ -234,6 +234,36 @@
   --overlay:rgba(10,10,10,0.55);
 }
 
+/* =========================================================================
+   LAYOUT UTILITIES
+   Small, composable primitives for flexbox alignment and spacing. New
+   markup should reach for these instead of writing another one-off
+   ".foo-row{ display:flex; justify-content:space-between; ... }" block.
+   Gap scale matches the values already in use across the app (4-24px).
+   These are additive: nothing in the app uses them yet except the merged
+   duplicate blocks below, so introducing them carries no visual risk.
+   ========================================================================= */
+.u-flex{ display:flex; }
+.u-flex-col{ display:flex; flex-direction:column; }
+.u-wrap{ flex-wrap:wrap; }
+.u-items-center{ align-items:center; }
+.u-items-baseline{ align-items:baseline; }
+.u-items-start{ align-items:flex-start; }
+.u-justify-between{ justify-content:space-between; }
+.u-justify-center{ justify-content:center; }
+
+.u-gap-xs{ gap:4px; }
+.u-gap-sm{ gap:8px; }
+.u-gap-md{ gap:12px; }
+.u-gap-lg{ gap:16px; }
+.u-gap-xl{ gap:20px; }
+.u-gap-2xl{ gap:24px; }
+
+/* Compound shorthand for the most common combination in this file: a
+   flex row that splits content to opposite ends, aligned on the text
+   baseline. Used below to de-duplicate .card-header-row/.chart-header-row. */
+.u-row-between{ display:flex; justify-content:space-between; align-items:baseline; }
+
 *{ box-sizing:border-box; }
 
 html,body{
@@ -415,7 +445,12 @@ button{
   margin-bottom:14px;
 }
 
-.card-header-row{
+/* .card-header-row and .chart-header-row (see REPORTS section below) share
+   an identical body - merged here via .u-row-between so the rule is
+   defined once. Each keeps its own selector so nothing in index.html or
+   the JS files needs to change. */
+.card-header-row,
+.chart-header-row{
   display:flex; justify-content:space-between; align-items:baseline;
   border-bottom:1px solid var(--border);
   padding-bottom:10px; margin-bottom:14px;
@@ -539,7 +574,10 @@ input:focus, select:focus, button:focus{
 
 /* Pay Details column: annual income / pay date / payments-per-year / save,
    stacked as a compact vertical mini-form within its grid column. */
-.pay-details-form{
+/* .pay-details-form and .account-forms form (see account sections below)
+   share an identical body - merged into one rule here. */
+.pay-details-form,
+.account-forms form{
   display:flex;
   flex-direction:column;
   gap:8px;
@@ -1047,7 +1085,7 @@ th.progress-col, td.progress-col{ width:110px; }
   font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted);
   margin:0 0 8px;
 }
-.account-forms form{ display:flex; flex-direction:column; gap:8px; }
+/* Body merged into .pay-details-form above. */
 .account-history{
   margin-top:14px;
   padding-top:14px;
@@ -1092,11 +1130,7 @@ th.progress-col, td.progress-col{ width:110px; }
   height:100% !important;
 }
 
-.chart-header-row{
-  display:flex; justify-content:space-between; align-items:baseline;
-  border-bottom:1px solid var(--border);
-  padding-bottom:10px; margin-bottom:14px;
-}
+/* Body merged into .card-header-row above. */
 .chart-header-row h2{ border:none; padding:0; margin:0; }
 .year-nav{
   display:flex; align-items:center; gap:10px;

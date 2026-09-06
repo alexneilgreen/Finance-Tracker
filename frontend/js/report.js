@@ -772,7 +772,6 @@ const Report = {
    reliable way to get bytes onto disk from this kind of app.
    ========================================================================= */
 document.addEventListener("DOMContentLoaded", () => {
-  const modal = document.getElementById("annual-report-modal");
   const modalBox = document.getElementById("annual-report-modal-box");
   const openBtn = document.getElementById("generate-annual-report-btn");
   const cancelBtn = document.getElementById("annual-report-cancel");
@@ -810,22 +809,18 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // Cancel and backdrop-click used to each run their own copy of
+  // "remove open class, then resetModal()" - both now just call
+  // ModalManager.close(), which runs resetModal() once via onClose.
+  ModalManager.register("annual-report-modal", { onClose: resetModal });
+
   openBtn.addEventListener("click", () => {
     yearInput.value = yearInput.value || new Date().getFullYear();
     resetModal();
-    modal.classList.add("open");
+    ModalManager.open("annual-report-modal");
   });
 
-  cancelBtn.addEventListener("click", () => {
-    modal.classList.remove("open");
-    resetModal();
-  });
-  modal.addEventListener("click", (e) => {
-    if (e.target === modal) {
-      modal.classList.remove("open");
-      resetModal();
-    }
-  });
+  cancelBtn.addEventListener("click", () => ModalManager.close("annual-report-modal"));
 
   confirmBtn.addEventListener("click", async () => {
     const year = yearInput.value || new Date().getFullYear();

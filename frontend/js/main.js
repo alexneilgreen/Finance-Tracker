@@ -221,6 +221,83 @@ function showToast(message, type = "info", duration = 5000) {
 }
 
 /**
+ * Consolidates the modal open/close, backdrop-click, and Escape-key
+ * handling that used to be copy-pasted per modal (save-preset in
+ * budget.js, split-transaction in track.js, annual-report in report.js -
+ * all three had their own `close = () => modal.classList.remove("open")`
+ * plus an identical `modal.addEventListener("click", (e) => { if
+ * (e.target === modal) close(); })`). Each modal still owns its own
+ * markup and button wiring; this only owns the open/close mechanics.
+ *
+ * Usage:
+ *   ModalManager.register("save-preset-modal", {
+ *     onOpen:  () => { ...reset fields... },
+ *     onClose: () => { ...teardown, e.g. revoke an object URL... },
+ *   });
+ *   ModalManager.open("save-preset-modal");
+ *   ModalManager.close("save-preset-modal");
+ *
+ * register() is idempotent (like the data.bound guard pattern used for
+ * event listeners elsewhere), so calling it more than once for the same
+ * id is safe and only wires the backdrop-click listener once.
+ *
+ * New behavior gained by centralizing this: Escape now closes whichever
+ * registered modal is currently open. No modal in the app had this
+ * before - it isn't a like-for-like port, it's a small added capability
+ * that came for free from having one place that knows which modals exist.
+ */
+const ModalManager = {
+  _registry: new Map(),
+  _escBound: false,
+
+  register(id, { onOpen, onClose } = {}) {
+    const modal = document.getElementById(id);
+    if (!modal || this._registry.has(id)) return;
+    this._registry.set(id, { onOpen, onClose });
+
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) this.close(id);
+    });
+
+    if (!this._escBound) {
+      this._escBound = true;
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") this._closeWhicheverIsOpen();
+      });
+    }
+  },
+
+  open(id) {
+    const modal = document.getElementById(id);
+    const entry = this._registry.get(id);
+    if (!modal || !entry) return;
+    if (entry.onOpen) entry.onOpen();
+    modal.classList.add("open");
+  },
+
+  close(id) {
+    const modal = document.getElementById(id);
+    const entry = this._registry.get(id);
+    if (!modal || !entry) return;
+    modal.classList.remove("open");
+    if (entry.onClose) entry.onClose();
+  },
+
+  // Only one modal is ever open at a time in this app, so Escape just
+  // needs to find it and route through close() so onClose still runs
+  // (the annual-report modal relies on onClose for its iframe/URL teardown).
+  _closeWhicheverIsOpen() {
+    for (const id of this._registry.keys()) {
+      const modal = document.getElementById(id);
+      if (modal && modal.classList.contains("open")) {
+        this.close(id);
+        return;
+      }
+    }
+  },
+};
+
+/**
  * Chart.js x-axis tick callback for a date-labeled line/area chart:
  * labels only the first data point of each calendar month (blank string
  * for every other point in that month), so the axis reads as one label
